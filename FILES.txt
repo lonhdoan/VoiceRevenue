@@ -7,11 +7,13 @@
 ./VoiceRevenue.xcodeproj/project.pbxproj
 ./VoiceRevenue/App/VoiceRevenueApp.swift
 ./VoiceRevenue/Models/TransactionModels.swift
+./VoiceRevenue/Parsing/ProductCatalog.swift
 ./VoiceRevenue/Parsing/TransactionParser.swift
 ./VoiceRevenue/Parsing/VietnameseMoneyParser.swift
 ./VoiceRevenue/Parsing/VietnameseTextNormalizer.swift
 ./VoiceRevenue/Parsing/VietnameseTimeParser.swift
 ./VoiceRevenue/Resources/Info.plist
+./VoiceRevenue/Resources/ProductCatalog.json
 ./VoiceRevenue/Services/Audio/AudioRecorder.swift
 ./VoiceRevenue/Services/Persistence/PersistenceController.swift
 ./VoiceRevenue/Services/Persistence/TransactionRepository.swift

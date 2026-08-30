@@ -51,21 +51,33 @@ struct SettingsView: View {
                     HStack {
                         Text("Chế độ")
                         Spacer()
-                        Text("Tự động · ưu tiên chính xác")
+                        Text("Online 2-pass · ưu tiên chính xác")
                             .foregroundColor(.secondary)
                     }
-                    Text("Khi có mạng, app cho phép Apple Speech dùng dịch vụ online để ưu tiên độ chính xác. Nếu online thất bại và thiết bị hỗ trợ vi-VN on-device, app tự thử lại cùng file ghi âm trên thiết bị.")
+                    Text("Khi có mạng, app nhận dạng lần 1 rồi dùng danh mục cửa hàng để tạo shortlist có bằng chứng và thử lại cùng file audio. Nếu online thất bại, app dùng vi-VN on-device khi thiết bị hỗ trợ.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
 
-                Section("Từ điển mặt hàng") {
-                    Text("Mỗi dòng một mặt hàng. Tối đa 100 cụm đầu tiên được gửi làm gợi ý cho Apple Speech; parser cũng dùng danh sách này để khớp tên mặt hàng.")
+                Section("Danh mục mặt hàng") {
+                    HStack {
+                        Text("Danh mục cửa hàng")
+                        Spacer()
+                        Text("\(vocabulary.catalogCount) mặt hàng")
+                            .foregroundColor(vocabulary.catalogCount > 0 ? .green : .red)
+                    }
+                    Text(vocabulary.catalogSourceFile)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text("Từ điển bổ sung")
+                        .font(.subheadline)
+                    Text("Mỗi dòng một tên mặt hàng thường nói ngắn gọn. Danh mục 1.000+ sản phẩm được dùng local; chỉ shortlist tối đa 100 cụm liên quan mới được gửi cho Apple Speech.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
                     TextEditor(text: $vocabulary.editableText)
-                        .frame(minHeight: 150)
+                        .frame(minHeight: 130)
 
                     HStack {
                         Text("Đã học \(vocabulary.learnedCorrectionCount) sửa lỗi")
@@ -96,7 +108,7 @@ struct SettingsView: View {
                             let success = await sync.testConnection()
                             connectionMessage = success
                                 ? "Kết nối thành công và truy cập được sheet."
-                                : (sync.lastError ?? "Kết nối thất bại")
+                                : (sync.lastError ?? "Chưa cấu hình URL Web App hợp lệ.")
                         }
                     }
                     .disabled(sync.connectionStatus == .testing)
@@ -112,16 +124,16 @@ struct SettingsView: View {
                     if !connectionMessage.isEmpty {
                         Text(connectionMessage)
                             .font(.footnote)
-                            .foregroundColor(sync.lastError == nil ? .secondary : .red)
+                            .foregroundColor(sync.connectionStatus == .failed ? .red : .secondary)
                     }
 
-                    Text("Dùng URL deployment kết thúc bằng /exec. URL /dev chỉ dành cho Test deployment trong Apps Script.")
+                    Text("Nếu URL trống/không hợp lệ, trạng thái là Chưa cấu hình. Chỉ lỗi mạng/server sau một request thật mới hiện Kết nối lỗi.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
 
                 Section("Diagnostics") {
-                    Text("Log nằm trên máy và không tự upload. File có thể chứa transcript, tên khách, sản phẩm và số tiền; chỉ chia sẻ khi bạn chủ động chọn.")
+                    Text("Log và audio nằm trên máy, không tự upload. File có thể chứa transcript, tên khách, sản phẩm và số tiền; chỉ chia sẻ khi bạn chủ động chọn.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
@@ -133,6 +145,16 @@ struct SettingsView: View {
                             model.alertMessage = "Không tìm thấy diagnostic log để export."
                         }
                     }
+
+                    Button("Export Last Recording") {
+                        if let url = model.recorder.lastRecordingURL {
+                            model.diagnostics.log(event: "diagnostics.audio_export.requested", payload: ["file": url.lastPathComponent])
+                            shareFile = ShareFile(url: url)
+                        } else {
+                            model.alertMessage = "Chưa có file ghi âm gần nhất để export."
+                        }
+                    }
+                    .disabled(model.recorder.lastRecordingURL == nil)
 
                     Button("Xóa Diagnostic Logs", role: .destructive) {
                         model.diagnostics.clearLogs()

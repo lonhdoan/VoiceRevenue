@@ -51,9 +51,18 @@ final class GoogleSheetsSyncService: ObservableObject {
     var isConfigured: Bool { (try? validatedURL()) != nil }
 
     func testConnection() async -> Bool {
+        let url: URL
+        do {
+            url = try validatedURL()
+        } catch {
+            lastError = error.localizedDescription
+            connectionStatus = .notConfigured
+            diagnostics?.log(event: "sync.ping.validation_error", payload: ["error": error.localizedDescription])
+            return false
+        }
+
         connectionStatus = .testing
         do {
-            let url = try validatedURL()
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

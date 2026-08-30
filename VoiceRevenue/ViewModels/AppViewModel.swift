@@ -2,11 +2,20 @@ import CoreData
 import Foundation
 import UIKit
 
+private struct LearnedCorrectionRecord: Codable, Equatable {
+    let sourceNormalized: String
+    var canonicalProduct: String
+    var confirmations: Int
+    var lastConfirmed: Date
+}
+
 @MainActor
 final class ProductVocabularyStore: ObservableObject {
     private enum Keys {
-        static let vocabulary = "productVocabulary.v0.1.1"
-        static let corrections = "productCorrections.v0.1.1"
+        static let customVocabulary = "productVocabulary.v0.1.1"
+        static let legacyCorrections = "productCorrections.v0.1.1"
+        static let correctionRecords = "productCorrections.v0.1.2"
+        static let recentProducts = "recentConfirmedProducts.v0.1.2"
     }
 
     private static let starterVocabulary = [
@@ -18,50 +27,139 @@ final class ProductVocabularyStore: ObservableObject {
     ]
 
     @Published var editableText: String {
-        didSet { UserDefaults.standard.set(editableText, forKey: Keys.vocabulary) }
+        didSet { UserDefaults.standard.set(editableText, forKey: Keys.customVocabulary) }
     }
 
-    @Published private var learnedCorrections: [String: String]
+    @Published private var learnedRecords: [String: LearnedCorrectionRecord]
+    @Published private var recentConfirmedProducts: [String]
+
+    let catalog: ProductCatalogFile?
 
     init() {
-        if let stored = UserDefaults.standard.string(forKey: Keys.vocabulary), !stored.isEmpty {
+        catalog = ProductCatalogLoader.loadBundled()
+
+        if let stored = UserDefaults.standard.string(forKey: Keys.customVocabulary), !stored.isEmpty {
             editableText = stored
         } else {
             editableText = Self.starterVocabulary.joined(separator: "\n")
         }
-        learnedCorrections = UserDefaults.standard.dictionary(forKey: Keys.corrections) as? [String: String] ?? [:]
+
+        if let data = UserDefaults.standard.data(forKey: Keys.correctionRecords),
+           let decoded = try? JSONDecoder().decode([String: LearnedCorrectionRecord].self, from: data) {
+            learnedRecords = decoded
+        } else {
+            let legacy = UserDefaults.standard.dictionary(forKey: Keys.legacyCorrections) as? [String: String] ?? [:]
+            learnedRecords = legacy.reduce(into: [:]) { partial, pair in
+                let source = VietnameseTextNormalizer.normalize(pair.key)
+                let canonical = pair.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !source.isEmpty, !canonical.isEmpty else { return }
+                partial[source] = LearnedCorrectionRecord(
+                    sourceNormalized: source,
+                    canonicalProduct: canonical,
+                    confirmations: 1,
+                    lastConfirmed: Date()
+                )
+            }
+        }
+
+        recentConfirmedProducts = UserDefaults.standard.stringArray(forKey: Keys.recentProducts) ?? []
     }
 
-    var products: [String] {
-        let values = editableText
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+    var catalogCount: Int { catalog?.productCount ?? 0 }
+    var catalogSourceFile: String { catalog?.sourceFile ?? "Không có catalog" }
+
+    var customProducts: [String] {
+        VietnameseTextNormalizer.normalizedVocabulary(
+            editableText
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    var allProducts: [String] {
+        // Preserve normalized collisions from the real catalog. Two distinct Vietnamese names
+        // can become identical after accent-insensitive normalization; the matcher knows how to
+        // keep those ambiguous instead of silently dropping one.
+        let values = customProducts + (catalog?.products.map(\.name) ?? [])
+        var seen = Set<String>()
+        return values.filter { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = trimmed.folding(options: [.caseInsensitive], locale: Locale(identifier: "vi_VN"))
+            return !trimmed.isEmpty && seen.insert(key).inserted
+        }
+    }
+
+    var initialContextualStrings: [String] {
+        let learned = learnedRecords.values
+            .sorted { $0.lastConfirmed > $1.lastConfirmed }
+            .map(\.canonicalProduct)
+        let values = learned + recentConfirmedProducts + customProducts
         return Array(VietnameseTextNormalizer.normalizedVocabulary(values).prefix(100))
     }
 
-    var corrections: [String: String] { learnedCorrections }
+    var corrections: [String: String] {
+        learnedRecords.reduce(into: [:]) { partial, pair in
+            partial[pair.key] = pair.value.canonicalProduct
+        }
+    }
 
     func learnCorrection(from observed: String, to canonical: String) {
         let observedKey = VietnameseTextNormalizer.normalize(observed)
         let canonicalValue = canonical.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !observedKey.isEmpty, !canonicalValue.isEmpty,
               observedKey != VietnameseTextNormalizer.normalize(canonicalValue) else { return }
-        learnedCorrections[observedKey] = canonicalValue
-        UserDefaults.standard.set(learnedCorrections, forKey: Keys.corrections)
+
+        if var existing = learnedRecords[observedKey] {
+            existing.canonicalProduct = canonicalValue
+            existing.confirmations += 1
+            existing.lastConfirmed = Date()
+            learnedRecords[observedKey] = existing
+        } else {
+            learnedRecords[observedKey] = LearnedCorrectionRecord(
+                sourceNormalized: observedKey,
+                canonicalProduct: canonicalValue,
+                confirmations: 1,
+                lastConfirmed: Date()
+            )
+        }
+        persistCorrections()
+    }
+
+    func recordConfirmedProducts(_ productText: String) {
+        let values = productText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var ordered = values + recentConfirmedProducts
+        var seen = Set<String>()
+        ordered = ordered.filter { value in
+            let key = VietnameseTextNormalizer.normalize(value)
+            return !key.isEmpty && seen.insert(key).inserted
+        }
+        recentConfirmedProducts = Array(ordered.prefix(50))
+        UserDefaults.standard.set(recentConfirmedProducts, forKey: Keys.recentProducts)
     }
 
     func clearCorrections() {
-        learnedCorrections.removeAll()
-        UserDefaults.standard.removeObject(forKey: Keys.corrections)
+        learnedRecords.removeAll()
+        UserDefaults.standard.removeObject(forKey: Keys.correctionRecords)
+        UserDefaults.standard.removeObject(forKey: Keys.legacyCorrections)
     }
 
-    var learnedCorrectionCount: Int { learnedCorrections.count }
+    var learnedCorrectionCount: Int { learnedRecords.count }
+
+    private func persistCorrections() {
+        if let data = try? JSONEncoder().encode(learnedRecords) {
+            UserDefaults.standard.set(data, forKey: Keys.correctionRecords)
+        }
+    }
 }
 
 @MainActor
 final class DiagnosticLogger: ObservableObject {
-    static let parserVersion = "0.1.1"
+    static let parserVersion = "0.1.2"
 
     @Published private(set) var currentLogURL: URL?
     private let directory: URL
@@ -178,6 +276,11 @@ final class AppViewModel: ObservableObject {
         self.repository = TransactionRepository(context: context)
         speech.diagnostics = diagnostics
         sync.diagnostics = diagnostics
+        diagnostics.log(event: "catalog.loaded", payload: [
+            "count": String(vocabulary.catalogCount),
+            "sourceFile": vocabulary.catalogSourceFile,
+            "customVocabularyCount": String(vocabulary.customProducts.count)
+        ])
     }
 
     func startRecording() async {
@@ -201,15 +304,25 @@ final class AppViewModel: ObservableObject {
 
         recorder.stop()
         guard case .recorded(let url) = recorder.state else { return }
-        diagnostics.log(event: "recording.stopped", payload: ["file": url.lastPathComponent])
 
-        if let text = await speech.transcribe(url: url, contextualStrings: vocabulary.products) {
+        var audioPayload = ["file": url.lastPathComponent]
+        if let metadata = recorder.metadata(for: url) {
+            for (key, value) in metadata.logPayload { audioPayload[key] = value }
+        }
+        diagnostics.log(event: "recording.stopped", payload: audioPayload)
+
+        if let text = await speech.transcribe(
+            url: url,
+            initialContextualStrings: vocabulary.initialContextualStrings,
+            catalogProducts: vocabulary.allProducts
+        ) {
             transcript = text
             diagnostics.log(event: "speech.result", payload: [
                 "recognitionMode": speech.lastRecognitionMode.rawValue,
                 "rawTranscript": text,
                 "normalizedTranscript": VietnameseTextNormalizer.normalize(text),
-                "contextualVocabularyCount": String(vocabulary.products.count),
+                "initialContextualCount": String(vocabulary.initialContextualStrings.count),
+                "catalogCount": String(vocabulary.catalogCount),
                 "onDeviceSupported": String(speech.supportsOnDevice)
             ])
         } else {
@@ -238,37 +351,55 @@ final class AppViewModel: ObservableObject {
 
         candidates = TransactionParser.parse(
             transcript,
-            vocabulary: vocabulary.products,
+            vocabulary: vocabulary.allProducts,
             corrections: vocabulary.corrections
         )
         if candidates.isEmpty {
             candidates = [CandidateTransaction(needsReview: true, sourceText: transcript)]
         }
+
         for candidate in candidates {
+            let evidence = candidate.productMatches.map { item in
+                let scoreText = item.score.map { String(format: "%.3f", $0) } ?? "nil"
+                return [
+                    "source=\(item.sourcePhrase)",
+                    "canonical=\(item.canonicalProduct)",
+                    "kind=\(item.matchKind.rawValue)",
+                    "score=\(scoreText)",
+                    "tokenStart=\(item.tokenStart)",
+                    "tokenCount=\(item.tokenCount)",
+                    "review=\(item.requiresReview)"
+                ].joined(separator: ",")
+            }.joined(separator: " || ")
+
+            let rejected = candidate.rejectedProductCandidates.map { item in
+                [
+                    "source=\(item.sourcePhrase)",
+                    "candidate=\(item.canonicalProduct)",
+                    "score=\(String(format: "%.3f", item.score))",
+                    "second=\(String(format: "%.3f", item.secondBestScore))",
+                    "tokenStart=\(item.tokenStart)",
+                    "tokenCount=\(item.tokenCount)",
+                    "reason=\(item.reason)"
+                ].joined(separator: ",")
+            }.joined(separator: " || ")
+
             diagnostics.log(event: "parser.product_match", payload: [
                 "sourceText": candidate.sourceText,
                 "observedProduct": candidate.originalProductText ?? "nil",
                 "finalProduct": candidate.product ?? "nil",
                 "matchKind": candidate.productMatchKind?.rawValue ?? "none",
                 "matchScore": candidate.productMatchScore.map { String(format: "%.3f", $0) } ?? "nil",
-                "needsReview": String(candidate.needsReview)
+                "needsReview": String(candidate.needsReview),
+                "evidence": evidence,
+                "rejectedCandidates": rejected
             ])
         }
 
         diagnostics.log(event: "parser.result", payload: [
             "rawTranscript": transcript,
             "normalizedTranscript": VietnameseTextNormalizer.normalize(transcript),
-            "candidateCount": String(candidates.count),
-            "candidates": candidates.map { candidate in
-                [
-                    candidate.customerName ?? "nil",
-                    candidate.product ?? "nil",
-                    candidate.amountVND.map(String.init) ?? "nil",
-                    candidate.productMatchKind?.rawValue ?? "none",
-                    candidate.productMatchScore.map { String(format: "%.3f", $0) } ?? "nil",
-                    candidate.needsReview ? "review" : "ok"
-                ].joined(separator: " | ")
-            }.joined(separator: " || ")
+            "candidateCount": String(candidates.count)
         ])
         flow = .review
     }
@@ -276,14 +407,9 @@ final class AppViewModel: ObservableObject {
     func confirmCandidates() {
         do {
             for candidate in candidates {
-                if let original = candidate.originalProductText,
-                   let finalProduct = candidate.product,
-                   VietnameseTextNormalizer.normalize(original) != VietnameseTextNormalizer.normalize(finalProduct) {
-                    vocabulary.learnCorrection(from: original, to: finalProduct)
-                    diagnostics.log(event: "review.product_correction", payload: [
-                        "from": original,
-                        "to": finalProduct
-                    ])
+                learnSafeCorrections(from: candidate)
+                if let product = candidate.product {
+                    vocabulary.recordConfirmedProducts(product)
                 }
                 try repository.save(candidate, transcript: transcript)
             }
@@ -309,5 +435,56 @@ final class AppViewModel: ObservableObject {
             _ = await sync.sync(item, context: context)
         }
         repository.reload()
+    }
+
+    private func learnSafeCorrections(from candidate: CandidateTransaction) {
+        guard let finalProduct = candidate.product else { return }
+        let finalLines = finalProduct
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for evidence in candidate.productMatches where evidence.matchKind == .fuzzySuggestion {
+            guard normalizedPhraseExists(evidence.sourcePhrase, in: candidate.sourceText) else { continue }
+            let canonicalMatch = finalLines.first {
+                VietnameseTextNormalizer.normalize($0) == VietnameseTextNormalizer.normalize(evidence.canonicalProduct)
+            }
+            if let canonicalMatch {
+                vocabulary.learnCorrection(from: evidence.sourcePhrase, to: canonicalMatch)
+                diagnostics.log(event: "review.product_correction", payload: [
+                    "from": evidence.sourcePhrase,
+                    "to": canonicalMatch,
+                    "reason": "confirmed_fuzzy_suggestion"
+                ])
+            } else if candidate.productMatches.count == 1, finalLines.count == 1, let edited = finalLines.first {
+                vocabulary.learnCorrection(from: evidence.sourcePhrase, to: edited)
+                diagnostics.log(event: "review.product_correction", payload: [
+                    "from": evidence.sourcePhrase,
+                    "to": edited,
+                    "reason": "manual_edit"
+                ])
+            }
+        }
+
+        if candidate.productMatches.count == 1,
+           let only = candidate.productMatches.first,
+           only.matchKind == .raw,
+           finalLines.count == 1,
+           let edited = finalLines.first,
+           VietnameseTextNormalizer.normalize(edited) != VietnameseTextNormalizer.normalize(only.sourcePhrase),
+           normalizedPhraseExists(only.sourcePhrase, in: candidate.sourceText) {
+            vocabulary.learnCorrection(from: only.sourcePhrase, to: edited)
+            diagnostics.log(event: "review.product_correction", payload: [
+                "from": only.sourcePhrase,
+                "to": edited,
+                "reason": "manual_raw_edit"
+            ])
+        }
+    }
+
+    private func normalizedPhraseExists(_ phrase: String, in source: String) -> Bool {
+        let normalizedPhrase = VietnameseTextNormalizer.normalize(phrase)
+        let normalizedSource = VietnameseTextNormalizer.normalize(source)
+        return !normalizedPhrase.isEmpty && normalizedSource.range(of: normalizedPhrase) != nil
     }
 }

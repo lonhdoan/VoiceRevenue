@@ -6,15 +6,8 @@ private struct ProductExtractionResult {
     let matchKind: ProductMatchKind?
     let matchScore: Double?
     let needsReview: Bool
-}
-
-private struct LocatedProductMatch {
-    let location: Int
-    let display: String
-    let kind: ProductMatchKind
-    let score: Double
-    let observed: String?
-    let needsReview: Bool
+    let evidence: [ProductMatchEvidence]
+    let rejected: [RejectedProductCandidate]
 }
 
 enum TransactionParser {
@@ -76,7 +69,9 @@ enum TransactionParser {
             sourceText: source.trimmingCharacters(in: .whitespacesAndNewlines),
             originalProductText: productResult.originalProductText,
             productMatchKind: productResult.matchKind,
-            productMatchScore: productResult.matchScore
+            productMatchScore: productResult.matchScore,
+            productMatches: productResult.evidence,
+            rejectedProductCandidates: productResult.rejected
         )
     }
 
@@ -99,7 +94,6 @@ enum TransactionParser {
         normalized: String? = nil,
         customer: String? = nil
     ) -> String? {
-        // Kept for compatibility with v0.1 tests/callers. v0.1.1 uses the richer overload internally.
         let money = effectiveAmount(in: input)
         let time = VietnameseTimeParser.firstTime(in: input)
         return extractProduct(from: input, money: money, time: time, vocabulary: [], corrections: [:]).product
@@ -122,176 +116,75 @@ enum TransactionParser {
         vocabulary: [String],
         corrections: [String: String]
     ) -> ProductExtractionResult {
-        let canonicalVocabulary = VietnameseTextNormalizer.normalizedVocabulary(vocabulary)
-        let normalizedInput = VietnameseTextNormalizer.normalize(input)
-        var located: [LocatedProductMatch] = []
-        var residual = normalizedInput
-
-        // 1) Explicit learned corrections are deterministic and may auto-apply.
-        for (observedRaw, canonicalRaw) in corrections {
-            let observed = VietnameseTextNormalizer.normalize(observedRaw)
-            let canonical = canonicalRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !observed.isEmpty, !canonical.isEmpty,
-                  let range = residual.range(of: observed) else { continue }
-            let location = residual.distance(from: residual.startIndex, to: range.lowerBound)
-            located.append(
-                LocatedProductMatch(
-                    location: location,
-                    display: canonical,
-                    kind: .learnedCorrection,
-                    score: 1.0,
-                    observed: observedRaw,
-                    needsReview: false
-                )
-            )
-            residual.replaceSubrange(range, with: String(repeating: " ", count: max(1, observed.count)))
-        }
-
-        // 2) Exact vocabulary matches preserve canonical Vietnamese spelling and optional quantity/unit from raw text.
-        for item in canonicalVocabulary {
-            let normalizedItem = VietnameseTextNormalizer.normalize(item)
-            guard !normalizedItem.isEmpty, let range = residual.range(of: normalizedItem) else { continue }
-            let location = residual.distance(from: residual.startIndex, to: range.lowerBound)
-            let display = displayValueForExactVocabulary(item, in: input)
-            located.append(
-                LocatedProductMatch(
-                    location: location,
-                    display: display,
-                    kind: .vocabularyExact,
-                    score: 1.0,
-                    observed: nil,
-                    needsReview: false
-                )
-            )
-            residual.replaceSubrange(range, with: String(repeating: " ", count: max(1, normalizedItem.count)))
-        }
-
-        // 3) One conservative fuzzy suggestion from the unmatched residual.
-        let unmatchedVocabulary = canonicalVocabulary.filter { item in
-            !located.contains { VietnameseTextNormalizer.normalize($0.display).hasPrefix(VietnameseTextNormalizer.normalize(item)) }
-        }
-        if let fuzzy = bestFuzzyVocabularyMatch(in: residual, vocabulary: unmatchedVocabulary) {
-            located.append(fuzzy)
-        }
-
-        if !located.isEmpty {
-            let ordered = located.sorted { lhs, rhs in
-                if lhs.location == rhs.location { return lhs.display < rhs.display }
-                return lhs.location < rhs.location
-            }
-            var seen = Set<String>()
-            let displayValues = ordered.compactMap { match -> String? in
-                let key = VietnameseTextNormalizer.normalize(match.display)
-                return seen.insert(key).inserted ? match.display : nil
-            }
-            let fuzzy = ordered.first(where: { $0.kind == .fuzzySuggestion })
-            let original = fuzzy?.observed ?? rawProductCandidate(in: input, money: money, time: time)
+        guard let raw = rawProductCandidate(in: input, money: money, time: time), !raw.isEmpty else {
             return ProductExtractionResult(
-                product: displayValues.joined(separator: "\n"),
-                originalProductText: original,
-                matchKind: fuzzy != nil ? .fuzzySuggestion : ordered.first?.kind,
-                matchScore: fuzzy?.score ?? ordered.map(\.score).min(),
-                needsReview: ordered.contains(where: \.needsReview)
+                product: nil,
+                originalProductText: nil,
+                matchKind: nil,
+                matchScore: nil,
+                needsReview: false,
+                evidence: [],
+                rejected: []
             )
         }
 
-        // 4) Fallback heuristic. Crucially, this returns RAW Vietnamese text, never normalized output.
-        let raw = rawProductCandidate(in: input, money: money, time: time)
+        let matchResult = ProductCatalogMatcher.matchProductsWithTrace(
+            in: raw,
+            vocabulary: vocabulary,
+            corrections: corrections
+        )
+        let evidence = matchResult.accepted
+
+        guard !evidence.isEmpty else {
+            return ProductExtractionResult(
+                product: raw,
+                originalProductText: raw,
+                matchKind: .raw,
+                matchScore: nil,
+                needsReview: true,
+                evidence: [
+                    ProductMatchEvidence(
+                        sourcePhrase: raw,
+                        canonicalProduct: raw,
+                        matchKind: .raw,
+                        score: nil,
+                        tokenStart: 0,
+                        tokenCount: ProductCatalogMatcher.tokens(in: raw).count,
+                        requiresReview: true
+                    )
+                ],
+                rejected: matchResult.rejected
+            )
+        }
+
+        var seen = Set<String>()
+        let displayValues = evidence.compactMap { match -> String? in
+            let key = VietnameseTextNormalizer.normalize(match.canonicalProduct)
+            guard seen.insert(key).inserted else { return nil }
+            return match.canonicalProduct
+        }
+
+        let fuzzy = evidence.first(where: { $0.matchKind == .fuzzySuggestion })
+        let aggregateKind: ProductMatchKind?
+        if fuzzy != nil {
+            aggregateKind = .fuzzySuggestion
+        } else if evidence.contains(where: { $0.matchKind == .learnedCorrection }) {
+            aggregateKind = .learnedCorrection
+        } else if evidence.contains(where: { $0.matchKind == .vocabularyExact }) {
+            aggregateKind = .vocabularyExact
+        } else {
+            aggregateKind = .raw
+        }
+
         return ProductExtractionResult(
-            product: raw,
-            originalProductText: raw,
-            matchKind: raw == nil ? nil : .raw,
-            matchScore: nil,
-            needsReview: false
+            product: displayValues.isEmpty ? raw : displayValues.joined(separator: "\n"),
+            originalProductText: fuzzy?.sourcePhrase ?? raw,
+            matchKind: aggregateKind,
+            matchScore: fuzzy?.score,
+            needsReview: evidence.contains(where: { $0.requiresReview }),
+            evidence: evidence,
+            rejected: matchResult.rejected
         )
-    }
-
-    private static func displayValueForExactVocabulary(_ vocabularyItem: String, in rawInput: String) -> String {
-        guard let phraseRange = rawInput.range(
-            of: vocabularyItem,
-            options: [.caseInsensitive, .diacriticInsensitive]
-        ) else { return vocabularyItem }
-
-        let suffix = String(rawInput[phraseRange.upperBound...])
-        let quantityPattern = #"^\s+(\d+(?:[\.,]\d+)?)\s*(m|mét|met|cm|mm|cái|cai|bộ|bo|hộp|hop|cuộn|cuon)\b"#
-        guard let regex = try? NSRegularExpression(pattern: quantityPattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)),
-              let matchRange = Range(match.range, in: suffix) else { return vocabularyItem }
-        let quantity = String(suffix[matchRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(vocabularyItem) \(quantity)"
-    }
-
-    private static func bestFuzzyVocabularyMatch(in normalizedInput: String, vocabulary: [String]) -> LocatedProductMatch? {
-        let words = normalizedInput
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
-            .filter { token in
-                !["anh", "chi", "co", "chu", "ban", "tra", "thanh", "toan", "tien", "cho", "cai", "gom", "bao", "gồm", "mua", "lay", "lúc", "luc", "khoang", "gio", "nghin", "ngan", "trieu", "cu", "vnd", "dong"].contains(token)
-                    && Int(token) == nil
-            }
-        guard !words.isEmpty else { return nil }
-
-        var best: (item: String, score: Double, phrase: String, location: Int)?
-        var secondBestScore = 0.0
-
-        for item in vocabulary {
-            let normalizedItem = VietnameseTextNormalizer.normalize(item)
-            let targetWords = normalizedItem.split(separator: " ").map(String.init)
-            guard !targetWords.isEmpty else { continue }
-            let n = targetWords.count
-            guard words.count >= n else { continue }
-
-            for start in 0...(words.count - n) {
-                let phrase = words[start..<(start + n)].joined(separator: " ")
-                let score = similarity(phrase, normalizedItem)
-                if let current = best {
-                    if score > current.score {
-                        secondBestScore = current.score
-                        best = (item, score, phrase, start)
-                    } else if score > secondBestScore {
-                        secondBestScore = score
-                    }
-                } else {
-                    best = (item, score, phrase, start)
-                }
-            }
-        }
-
-        guard let best else { return nil }
-        let threshold = best.item.split(separator: " ").count == 1 ? 0.78 : 0.60
-        guard best.score >= threshold, best.score - secondBestScore >= 0.06 else { return nil }
-
-        return LocatedProductMatch(
-            location: best.location,
-            display: best.item,
-            kind: .fuzzySuggestion,
-            score: best.score,
-            observed: best.phrase,
-            needsReview: true
-        )
-    }
-
-    private static func similarity(_ lhs: String, _ rhs: String) -> Double {
-        let a = Array(lhs)
-        let b = Array(rhs)
-        if a == b { return 1.0 }
-        if a.isEmpty || b.isEmpty { return 0.0 }
-
-        var previous = Array(0...b.count)
-        for (i, ca) in a.enumerated() {
-            var current = [i + 1] + Array(repeating: 0, count: b.count)
-            for (j, cb) in b.enumerated() {
-                let cost = ca == cb ? 0 : 1
-                current[j + 1] = min(
-                    current[j] + 1,
-                    previous[j + 1] + 1,
-                    previous[j] + cost
-                )
-            }
-            previous = current
-        }
-        let distance = previous[b.count]
-        return 1.0 - Double(distance) / Double(max(a.count, b.count))
     }
 
     private static func rawProductCandidate(
@@ -344,24 +237,12 @@ enum TransactionParser {
         }
 
         guard !candidate.isEmpty else { return nil }
-
-        let pieces = candidate
-            .replacingOccurrences(of: #"\s+(?:và|va)\s+"#, with: "\n", options: [.regularExpression, .caseInsensitive])
-            .components(separatedBy: ",")
-            .flatMap { $0.components(separatedBy: ";") }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)) }
-            .filter { !$0.isEmpty }
-
-        guard !pieces.isEmpty else { return nil }
-        return pieces.joined(separator: "\n")
+        return candidate
     }
 
     private static func replacingInsensitive(_ needle: String, in input: String, with replacement: String) -> String {
         var output = input
-        while let range = output.range(
-            of: needle,
-            options: [.caseInsensitive, .diacriticInsensitive]
-        ) {
+        while let range = output.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) {
             output.replaceSubrange(range, with: replacement)
         }
         return output
@@ -440,8 +321,6 @@ enum TransactionSegmenter {
 
 enum CorrectionResolver {
     static func applyBasicCorrections(_ transcript: String) -> String {
-        // v0.1.1 preserves the original transcript. TransactionParser selects the amount
-        // after an explicit correction marker without normalizing away Vietnamese accents.
         transcript
     }
 }

@@ -1,8 +1,8 @@
-# VoiceRevenue v0.1.1
+# VoiceRevenue v0.1.2
 
 VoiceRevenue is a Vietnamese-first, local-first iPhone app for recording store revenue by voice. It is **free and open source (MIT)** and intentionally avoids paid APIs, advertising, analytics, tracking, subscriptions, and maintainer-controlled servers.
 
-## What v0.1.1 does
+## What v0.1.2 does
 
 1. Records audio with `AVFoundation`.
 2. Transcribes Vietnamese using Apple's `Speech` framework (`vi-VN`) with an **accuracy-first automatic mode**.
@@ -21,7 +21,7 @@ No OpenAI API, Google Cloud backend, Firebase, paid SaaS, third-party Swift pack
 
 ## Speech accuracy policy
 
-VoiceRevenue v0.1.1 prioritizes practical accuracy while keeping the core app at $0:
+VoiceRevenue v0.1.2 prioritizes practical accuracy while keeping the core app at $0:
 
 - When Apple Speech reports its service available, the app sends an online-capable request (`requiresOnDeviceRecognition = false`). Apple may use its service; VoiceRevenue does not have a separate paid speech API account or key.
 - If that attempt fails and `vi-VN` on-device recognition is supported, the app retries the **same local recording** with `requiresOnDeviceRecognition = true`.
@@ -31,9 +31,29 @@ VoiceRevenue v0.1.1 prioritizes practical accuracy while keeping the core app at
 
 Apple documents that on-device recognition may be less accurate than recognition that is allowed to use the network. VoiceRevenue therefore no longer forces on-device mode when online recognition is available.
 
-### Why Whisper is not bundled in v0.1.1
+### Why Whisper is not bundled in v0.1.2
 
-`whisper.cpp` is open source and has an iOS example, but even its multilingual models add substantial disk/RAM cost (for example, tiny is roughly 75 MiB and base roughly 142 MiB before app overhead). On old iOS 15 devices this would materially increase IPA size, memory use, build complexity, and processing latency. WhisperKit-style integrations also commonly require newer deployment targets than this project. For v0.1.1, Apple Speech on-device remains the most practical offline fallback. A fully local Whisper option remains a possible v0.2 experiment for newer devices.
+`whisper.cpp` is open source and has an iOS example, but even its multilingual models add substantial disk/RAM cost (for example, tiny is roughly 75 MiB and base roughly 142 MiB before app overhead). On old iOS 15 devices this would materially increase IPA size, memory use, build complexity, and processing latency. WhisperKit-style integrations also commonly require newer deployment targets than this project. For v0.1.2, Apple Speech on-device remains the most practical offline fallback. A fully local Whisper option remains a possible v0.2 experiment for newer devices.
+
+## Store catalog and two-pass recognition
+
+v0.1.2 bundles the real store inventory catalog generated from `[Cửa hàng] Kiểm kê hàng tồn.xlsx`:
+
+- 1,304 source product rows were read from 3 product sheets;
+- 1,267 canonical product names are bundled;
+- 37 exact duplicate names were removed;
+- 62 blank-name rows were skipped;
+- 0 malformed product rows were imported;
+- 5 normalized-name collisions are intentionally retained because removing Vietnamese accents can collapse distinct products.
+
+The full catalog stays local. It is **not** sent wholesale to Apple Speech. Online-capable recognition uses two conservative passes only when pass 1 produces evidence-backed catalog hints:
+
+1. pass 1 recognizes the same local audio with a small priority context;
+2. local catalog matching builds a bounded shortlist (max 100 Apple contextual phrases);
+3. pass 2 reuses the **same audio** with that shortlist;
+4. pass 2 is selected only when Apple's own average segment confidence materially improves. Catalog match count is logged for diagnostics but does **not** decide the winner, preventing self-reinforcing product hallucination.
+
+Every canonical product emitted by the parser must be tied to a source phrase in the raw product span or to an exact user-learned correction whose source phrase is actually present. Unknown text remains raw and review-required rather than being forced to the nearest catalog item.
 
 ## Product vocabulary
 
@@ -56,7 +76,7 @@ The first 100 unique phrases are used as Apple Speech contextual hints. The loca
 
 ## Diagnostics
 
-Open **Settings → Diagnostics → Export Debug Log**.
+Open **Settings → Diagnostics**. You can **Export Debug Log** and **Export Last Recording**.
 
 The exported `.jsonl` file is stored locally and can include:
 
@@ -64,7 +84,7 @@ The exported `.jsonl` file is stored locally and can include:
 - speech mode and availability;
 - raw + normalized transcript;
 - contextual vocabulary count;
-- parser candidates/match information;
+- parser candidates, accepted evidence, and rejected fuzzy candidates;
 - user-confirmed product corrections;
 - Google Sheets request/result/error metadata.
 
@@ -130,7 +150,7 @@ VoiceRevenue works fully without Google Sheets.
 8. Deploy and copy the versioned URL ending in `/exec`.
 9. In VoiceRevenue open **Settings → Google Sheets**.
 10. Paste the `/exec` URL and tap **Kiểm tra kết nối**.
-11. A successful health check confirms that the endpoint is VoiceRevenue v0.1.1 and can access/create the `Transactions` sheet.
+11. A successful health check confirms that the endpoint is VoiceRevenue v0.1.1+ and can access/create the `Transactions` sheet.
 12. Use **Đồng bộ lại X giao dịch** for pending/failed rows.
 
 `setup()` is required because Google documents that active-container methods such as `getActiveSpreadsheet()` are not available to a bound script when it executes as a Web App. The setup step captures the sheet ID while run from the editor; the deployed endpoint then reopens that exact spreadsheet with `SpreadsheetApp.openById(...)`.
@@ -175,7 +195,7 @@ Core principles:
 - Setting `requiresOnDeviceRecognition = false` allows online-backed recognition but does not expose a public API proving whether Apple actually processed a specific request on a server; VoiceRevenue logs this mode as `online` to mean **online-capable/preferred**.
 - Contextual vocabulary improves likelihood, not certainty.
 - Fuzzy matching is intentionally conservative and still requires human review.
-- Product segmentation remains deterministic rather than a general-language AI model.
+- Product segmentation remains deterministic rather than a general-language AI model. Unknown/ambiguous products intentionally require review.
 - Google Apps Script access options can be restricted by Google Workspace administrators.
 - The generation environment for this patch does not contain macOS/Xcode; GitHub Actions remains the authoritative full iOS build/test environment.
 

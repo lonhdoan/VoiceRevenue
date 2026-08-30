@@ -31,6 +31,27 @@ enum ProductMatchKind: String, Codable, Equatable {
     case fuzzySuggestion
 }
 
+struct ProductMatchEvidence: Equatable {
+    let sourcePhrase: String
+    let canonicalProduct: String
+    let matchKind: ProductMatchKind
+    let score: Double?
+    let tokenStart: Int
+    let tokenCount: Int
+    let requiresReview: Bool
+}
+
+
+struct RejectedProductCandidate: Equatable {
+    let sourcePhrase: String
+    let canonicalProduct: String
+    let score: Double
+    let secondBestScore: Double
+    let tokenStart: Int
+    let tokenCount: Int
+    let reason: String
+}
+
 struct CandidateTransaction: Identifiable, Equatable {
     let id: UUID
     var paymentAt: Date?
@@ -46,6 +67,8 @@ struct CandidateTransaction: Identifiable, Equatable {
     var originalProductText: String?
     var productMatchKind: ProductMatchKind?
     var productMatchScore: Double?
+    var productMatches: [ProductMatchEvidence]
+    var rejectedProductCandidates: [RejectedProductCandidate]
 
     init(
         id: UUID = UUID(),
@@ -59,7 +82,9 @@ struct CandidateTransaction: Identifiable, Equatable {
         sourceText: String = "",
         originalProductText: String? = nil,
         productMatchKind: ProductMatchKind? = nil,
-        productMatchScore: Double? = nil
+        productMatchScore: Double? = nil,
+        productMatches: [ProductMatchEvidence] = [],
+        rejectedProductCandidates: [RejectedProductCandidate] = []
     ) {
         self.id = id
         self.paymentAt = paymentAt
@@ -73,6 +98,8 @@ struct CandidateTransaction: Identifiable, Equatable {
         self.originalProductText = originalProductText
         self.productMatchKind = productMatchKind
         self.productMatchScore = productMatchScore
+        self.productMatches = productMatches
+        self.rejectedProductCandidates = rejectedProductCandidates
     }
 }
 

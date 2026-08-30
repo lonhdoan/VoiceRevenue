@@ -162,6 +162,102 @@ final class ParserTests: XCTestCase {
         )
     }
 
+
+    func testCatalogResourceLoadsAtScale() {
+        let catalog = ProductCatalogLoader.loadBundled()
+        XCTAssertNotNil(catalog)
+        XCTAssertGreaterThanOrEqual(catalog?.productCount ?? 0, 1000)
+        XCTAssertEqual(catalog?.malformedRows, 0)
+        XCTAssertTrue(catalog?.products.allSatisfy { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false)
+        XCTAssertTrue(catalog?.products.contains(where: { $0.name == "Dập ghim" }) ?? false)
+        XCTAssertTrue(catalog?.products.contains(where: { $0.name == "Bút bi" }) ?? false)
+    }
+
+    func testFalsePositiveRegressionDoesNotInventDayDien() {
+        let realCatalog = ProductCatalogLoader.loadBundled()?.products.map(\.name) ?? []
+        let catalog = realCatalog + ["dập ghim", "dây điện"]
+        let values = TransactionParser.parse(
+            "Tập Gym thước kẻ bút bi 50.000",
+            vocabulary: catalog
+        )
+        XCTAssertEqual(values.count, 1)
+        let lines = Set(
+            (values.first?.product ?? "")
+                .components(separatedBy: .newlines)
+                .map(VietnameseTextNormalizer.normalize)
+        )
+        XCTAssertFalse(lines.contains("day dien"))
+        XCTAssertTrue(lines.contains("but bi"))
+        XCTAssertTrue(lines.contains("thuoc ke"))
+        XCTAssertTrue(lines.contains("dap ghim"))
+        XCTAssertTrue(values.first?.needsReview ?? false)
+    }
+
+    func testLearnedCorrectionRequiresSourceEvidence() {
+        let corrections = ["tap gym": "dập ghim"]
+        let corrected = TransactionParser.parse(
+            "tập gym 50 nghìn",
+            vocabulary: ["dập ghim", "thước kẻ"],
+            corrections: corrections
+        )
+        XCTAssertEqual(corrected.first?.product, "dập ghim")
+        XCTAssertEqual(corrected.first?.productMatchKind, .learnedCorrection)
+
+        let unrelated = TransactionParser.parse(
+            "thước kẻ 50 nghìn",
+            vocabulary: ["dập ghim", "thước kẻ"],
+            corrections: corrections
+        )
+        XCTAssertEqual(unrelated.first?.product, "thước kẻ")
+        XCTAssertFalse((unrelated.first?.product ?? "").contains("dập ghim"))
+    }
+
+    func testMultiItemEvidenceBackedProducts() {
+        let values = TransactionParser.parse(
+            "dập ghim thước kẻ bút bi 50 nghìn",
+            vocabulary: ["dập ghim", "bút bi"]
+        )
+        XCTAssertEqual(values.count, 1)
+        let lines = (values.first?.product ?? "").components(separatedBy: .newlines)
+        XCTAssertEqual(lines, ["dập ghim", "thước kẻ", "bút bi"])
+    }
+
+    func testUnknownProductStaysRawAndNeedsReview() {
+        let values = TransactionParser.parse(
+            "abcxyz 50 nghìn",
+            vocabulary: ["dập ghim", "dây điện", "bút bi"]
+        )
+        XCTAssertEqual(values.first?.product, "abcxyz")
+        XCTAssertTrue(values.first?.needsReview ?? false)
+        XCTAssertNotEqual(values.first?.product, "dập ghim")
+        XCTAssertNotEqual(values.first?.product, "dây điện")
+    }
+
+    func testContextualShortlistIsEvidenceBounded() {
+        let shortlist = ProductCatalogMatcher.contextualShortlist(
+            from: "tập gym thước kẻ bút bi năm mươi nghìn",
+            vocabulary: ["dập ghim", "dây điện", "bút bi", "ốc vít"],
+            priority: []
+        )
+        XCTAssertTrue(shortlist.contains("dập ghim"))
+        XCTAssertTrue(shortlist.contains("bút bi"))
+        XCTAssertFalse(shortlist.contains("dây điện"))
+    }
+
+    func testMatcherKeepsRejectedCandidatesDiagnosticOnly() {
+        let result = ProductCatalogMatcher.matchProductsWithTrace(
+            in: "thước kẻ bút bi",
+            vocabulary: ["dập ghim", "dây điện", "bút bi", "ốc vít"],
+            corrections: [:]
+        )
+        XCTAssertFalse(result.accepted.contains {
+            VietnameseTextNormalizer.normalize($0.canonicalProduct) == "day dien"
+        })
+        XCTAssertTrue(result.accepted.contains {
+            VietnameseTextNormalizer.normalize($0.canonicalProduct) == "but bi"
+        })
+    }
+
     func testAmbiguousTimeNeedsReview() {
         let values = TransactionParser.parse("lúc 7 giờ anh Nam 350 nghìn tiền biển neon")
         XCTAssertTrue(values.first?.needsReview ?? false)
@@ -209,6 +305,14 @@ final class GoogleSheetsSyncTests: XCTestCase {
         service.webAppURLString = "https://script.google.com/macros/s/abc/dev"
         XCTAssertFalse(await service.testConnection())
         XCTAssertTrue(service.lastError?.contains("/dev") ?? false)
+    }
+
+    @MainActor
+    func testEmptyURLRemainsNotConfigured() async {
+        let service = GoogleSheetsSyncService(session: makeSession())
+        service.webAppURLString = ""
+        XCTAssertFalse(await service.testConnection())
+        XCTAssertEqual(service.connectionStatus, .notConfigured)
     }
 
     @MainActor

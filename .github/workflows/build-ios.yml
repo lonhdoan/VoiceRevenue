@@ -1,4 +1,4 @@
-name: VoiceRevenue - Phase 2 Diagnostics
+name: VoiceRevenue - Phase 3 Unsigned IPA
 
 on:
   workflow_dispatch:
@@ -7,77 +7,36 @@ permissions:
   contents: read
 
 jobs:
-  diagnostics:
-    name: Inspect Xcode Project
+  build-unsigned-ipa:
+    name: Build Unsigned iPhone IPA
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: System information
+      - name: Environment
         shell: bash
         run: |
+          set -e
+
           echo "========================================"
-          echo "=== SYSTEM ==="
+          echo "=== ENVIRONMENT ==="
           echo "========================================"
 
-          echo "Current directory:"
-          pwd
-
-          echo ""
-          echo "macOS version:"
+          echo "macOS:"
           sw_vers
 
           echo ""
-          echo "Kernel:"
-          uname -a
+          echo "Runner architecture:"
+          uname -m
 
           echo ""
-          echo "GitHub runner:"
-          echo "RUNNER_OS=$RUNNER_OS"
-          echo "RUNNER_ARCH=$RUNNER_ARCH"
+          echo "Selecting Xcode 16.4..."
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
 
           echo ""
-          echo "Repository root contents:"
-          ls -la
-
-      - name: Verify Xcode project
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "=== PROJECT FILE ==="
-          echo "========================================"
-
-          if [ ! -d "VoiceRevenue.xcodeproj" ]; then
-            echo "::error::ERROR: VoiceRevenue.xcodeproj not found at repository root"
-            echo ""
-            echo "Repository root actually contains:"
-            ls -la
-            exit 1
-          fi
-
-          echo "OK: VoiceRevenue.xcodeproj exists at repository root"
-
-          if [ ! -f "VoiceRevenue.xcodeproj/project.pbxproj" ]; then
-            echo "::error::ERROR: VoiceRevenue.xcodeproj/project.pbxproj is missing"
-            exit 1
-          fi
-
-          echo "OK: project.pbxproj exists"
-
-          echo ""
-          echo "Xcode project contents:"
-          find VoiceRevenue.xcodeproj -maxdepth 2 -type f -print
-
-      - name: Xcode and Swift versions
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "=== XCODE ==="
-          echo "========================================"
-
           echo "Selected developer directory:"
           xcode-select -p
 
@@ -90,102 +49,326 @@ jobs:
           swift --version
 
           echo ""
-          echo "xcodebuild executable:"
-          xcrun --find xcodebuild
+          echo "iPhoneOS SDK:"
+          xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Available Apple SDKs
+      - name: Project check
         shell: bash
         run: |
-          echo "========================================"
-          echo "=== AVAILABLE SDKs ==="
-          echo "========================================"
-
-          xcodebuild -showsdks
-
-          echo ""
-          echo "Current iPhoneOS SDK path:"
-          xcrun --sdk iphoneos --show-sdk-path || true
-
-          echo ""
-          echo "Current iPhoneOS SDK version:"
-          xcrun --sdk iphoneos --show-sdk-version || true
-
-      - name: Inspect Xcode project
-        shell: bash
-        run: |
-          set -o pipefail
+          set -e
 
           echo "========================================"
-          echo "=== XCODEBUILD LIST ==="
+          echo "=== PROJECT CHECK ==="
           echo "========================================"
 
-          xcodebuild \
-            -list \
-            -project VoiceRevenue.xcodeproj \
-            2>&1 | tee "$RUNNER_TEMP/xcodebuild-list.txt"
+          pwd
+          ls -la
 
-          echo ""
-          echo "========================================"
-          echo "=== SCHEME CHECK ==="
-          echo "========================================"
+          if [ ! -d "VoiceRevenue.xcodeproj" ]; then
+            echo "::error::VoiceRevenue.xcodeproj was not found at repository root."
+            exit 1
+          fi
 
-          if awk '
-            /Schemes:/ {
-              inSchemes = 1
-              next
-            }
-
-            inSchemes && /^[[:space:]]+VoiceRevenue[[:space:]]*$/ {
-              found = 1
-            }
-
-            END {
-              exit found ? 0 : 1
-            }
-          ' "$RUNNER_TEMP/xcodebuild-list.txt"
-          then
-            echo "FOUND: scheme VoiceRevenue"
-
-            echo ""
-            echo "========================================"
-            echo "=== IMPORTANT BUILD SETTINGS ==="
-            echo "========================================"
-
-            set +e
-
-            xcodebuild \
-              -showBuildSettings \
-              -project VoiceRevenue.xcodeproj \
-              -scheme VoiceRevenue \
-              2>&1 \
-              | tee "$RUNNER_TEMP/build-settings-full.txt"
-
-            SHOW_SETTINGS_STATUS=${PIPESTATUS[0]}
-
-            set -e
-
-            echo ""
-            echo "Important settings:"
-
-            grep -E \
-              '^[[:space:]]+(TARGET_NAME|PRODUCT_NAME|PRODUCT_BUNDLE_IDENTIFIER|WRAPPER_NAME|CONFIGURATION|SDKROOT|SUPPORTED_PLATFORMS|IPHONEOS_DEPLOYMENT_TARGET|ARCHS|VALID_ARCHS|INFOPLIST_FILE|CODE_SIGN_STYLE|CODE_SIGNING_ALLOWED|CODE_SIGNING_REQUIRED)[[:space:]]*=' \
-              "$RUNNER_TEMP/build-settings-full.txt" \
-              || true
-
-            if [ "$SHOW_SETTINGS_STATUS" -ne 0 ]; then
-              echo "::warning::xcodebuild -showBuildSettings returned a non-zero status. PHASE 2 diagnostics will continue."
-            fi
-          else
-            echo "::warning::Scheme 'VoiceRevenue' was NOT found."
-            echo "Do not build yet. Use the XCODEBUILD LIST output above to determine the real scheme."
+          if [ ! -f "VoiceRevenue.xcodeproj/project.pbxproj" ]; then
+            echo "::error::VoiceRevenue.xcodeproj/project.pbxproj is missing."
+            exit 1
           fi
 
           echo ""
+          echo "Confirming project configuration..."
+
+          xcodebuild \
+            -list \
+            -project VoiceRevenue.xcodeproj
+
+          echo ""
+          echo "Project check OK."
+
+      - name: Build iPhoneOS
+        shell: bash
+        run: |
+          set -o pipefail
+          set -e
+
           echo "========================================"
-          echo "=== PHASE 2 COMPLETE ==="
+          echo "=== BUILD IPHONEOS ==="
           echo "========================================"
 
-          echo "Diagnostics finished."
-          echo "No app was built."
-          echo "No signing was attempted."
-          echo "No certificate or provisioning profile was used."
+          DERIVED_DATA="$RUNNER_TEMP/DerivedData"
+
+          echo "DerivedData:"
+          echo "$DERIVED_DATA"
+
+          rm -rf "$DERIVED_DATA"
+
+          xcodebuild \
+            -project VoiceRevenue.xcodeproj \
+            -scheme VoiceRevenue \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+
+          echo ""
+          echo "xcodebuild completed successfully."
+
+      - name: Locate built app
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "=== LOCATE APP ==="
+          echo "========================================"
+
+          PRODUCTS="$RUNNER_TEMP/DerivedData/Build/Products"
+
+          echo "Build products:"
+          find "$PRODUCTS" -maxdepth 3 -print || true
+
+          EXPECTED_APP="$PRODUCTS/Release-iphoneos/VoiceRevenue.app"
+
+          if [ -d "$EXPECTED_APP" ]; then
+            APP_PATH="$EXPECTED_APP"
+          else
+            echo ""
+            echo "Expected path was not found."
+            echo "Searching Release-iphoneos products..."
+
+            APP_PATH="$(find "$PRODUCTS" \
+              -type d \
+              -name 'VoiceRevenue.app' \
+              -path '*Release-iphoneos*' \
+              -print \
+              -quit)"
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::VoiceRevenue.app was not found in Release-iphoneos."
+            echo ""
+            echo "All .app bundles found:"
+            find "$PRODUCTS" -type d -name '*.app' -print || true
+            exit 1
+          fi
+
+          if [[ "$APP_PATH" == *"iphonesimulator"* ]]; then
+            echo "::error::Simulator app detected. Refusing to package it as an IPA."
+            exit 1
+          fi
+
+          echo "Found device app:"
+          echo "$APP_PATH"
+
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Built app does not contain Info.plist."
+            exit 1
+          fi
+
+          EXECUTABLE_NAME="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          if [ -z "$EXECUTABLE_NAME" ]; then
+            echo "::error::Could not determine CFBundleExecutable."
+            exit 1
+          fi
+
+          EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE_NAME"
+
+          if [ ! -f "$EXECUTABLE_PATH" ]; then
+            echo "::error::App executable was not found: $EXECUTABLE_PATH"
+            exit 1
+          fi
+
+          echo ""
+          echo "CFBundleExecutable:"
+          echo "$EXECUTABLE_NAME"
+
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "EXECUTABLE_NAME=$EXECUTABLE_NAME" >> "$GITHUB_ENV"
+          echo "EXECUTABLE_PATH=$EXECUTABLE_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify device binary
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "=== DEVICE BINARY VERIFICATION ==="
+          echo "========================================"
+
+          echo "App:"
+          echo "$APP_PATH"
+
+          echo ""
+          echo "Executable:"
+          echo "$EXECUTABLE_PATH"
+
+          echo ""
+          echo "file output:"
+          file "$EXECUTABLE_PATH"
+
+          echo ""
+          echo "Architectures:"
+          lipo -info "$EXECUTABLE_PATH" || true
+
+          echo ""
+          echo "Mach-O build platform:"
+          BUILD_INFO="$(xcrun vtool -show-build "$EXECUTABLE_PATH" 2>&1 || true)"
+          echo "$BUILD_INFO"
+
+          if echo "$BUILD_INFO" | grep -q "IOSSIMULATOR"; then
+            echo "::error::Binary reports IOSSIMULATOR. This cannot be packaged for a physical iPhone."
+            exit 1
+          fi
+
+          if echo "$BUILD_INFO" | grep -Eq 'platform[[:space:]]+IOS([[:space:]]|$)'; then
+            echo ""
+            echo "OK: Mach-O binary platform is IOS."
+          else
+            echo "::error::Could not verify that the Mach-O platform is IOS."
+            exit 1
+          fi
+
+          if [[ "$APP_PATH" != *"Release-iphoneos"* ]]; then
+            echo "::error::App did not come from Release-iphoneos."
+            exit 1
+          fi
+
+          echo ""
+          echo "OK: This is an iPhoneOS device build."
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "=== PACKAGE IPA ==="
+          echo "========================================"
+
+          PACKAGE_ROOT="$RUNNER_TEMP/ipa-package"
+          IPA_PATH="$GITHUB_WORKSPACE/VoiceRevenue-v0.1-unsigned.ipa"
+
+          rm -rf "$PACKAGE_ROOT"
+          rm -f "$IPA_PATH"
+
+          mkdir -p "$PACKAGE_ROOT/Payload"
+
+          echo "Copying:"
+          echo "$APP_PATH"
+          echo ""
+          echo "to:"
+          echo "$PACKAGE_ROOT/Payload/VoiceRevenue.app"
+
+          ditto \
+            "$APP_PATH" \
+            "$PACKAGE_ROOT/Payload/VoiceRevenue.app"
+
+          if [ ! -d "$PACKAGE_ROOT/Payload/VoiceRevenue.app" ]; then
+            echo "::error::Failed to create Payload/VoiceRevenue.app."
+            exit 1
+          fi
+
+          cd "$PACKAGE_ROOT"
+
+          /usr/bin/zip \
+            -qry \
+            "$IPA_PATH" \
+            Payload
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA file was not created."
+            exit 1
+          fi
+
+          echo ""
+          echo "Created:"
+          echo "$IPA_PATH"
+
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify IPA
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "=== IPA CONTENTS ==="
+          echo "========================================"
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA file does not exist."
+            exit 1
+          fi
+
+          echo "Testing ZIP integrity..."
+          unzip -t "$IPA_PATH"
+
+          echo ""
+          echo "IPA contents:"
+          unzip -l "$IPA_PATH"
+
+          echo ""
+          echo "Checking Payload app..."
+
+          if ! unzip -Z1 "$IPA_PATH" \
+            | grep -q '^Payload/VoiceRevenue.app/'; then
+            echo "::error::IPA does not contain Payload/VoiceRevenue.app."
+            exit 1
+          fi
+
+          if ! unzip -Z1 "$IPA_PATH" \
+            | grep -q "^Payload/VoiceRevenue.app/${EXECUTABLE_NAME}$"; then
+            echo "::error::IPA does not contain the application executable."
+            exit 1
+          fi
+
+          echo ""
+          echo "IPA size:"
+          ls -lh "$IPA_PATH"
+
+          echo ""
+          echo "SHA256:"
+          shasum -a 256 "$IPA_PATH"
+
+          echo ""
+          echo "OK: IPA structure is valid."
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: VoiceRevenue-v0.1-unsigned
+          path: VoiceRevenue-v0.1-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build complete
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "=== BUILD COMPLETE ==="
+          echo "========================================"
+
+          echo "SUCCESS"
+          echo ""
+          echo "Artifact:"
+          echo "VoiceRevenue-v0.1-unsigned"
+          echo ""
+          echo "File:"
+          echo "VoiceRevenue-v0.1-unsigned.ipa"
+          echo ""
+          echo "Signing:"
+          echo "NONE"
+          echo ""
+          echo "Target platform:"
+          echo "iPhoneOS physical device"

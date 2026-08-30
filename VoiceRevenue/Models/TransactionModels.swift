@@ -24,6 +24,13 @@ enum SyncStatus: String, Codable {
     case failed
 }
 
+enum ProductMatchKind: String, Codable, Equatable {
+    case raw
+    case vocabularyExact
+    case learnedCorrection
+    case fuzzySuggestion
+}
+
 struct CandidateTransaction: Identifiable, Equatable {
     let id: UUID
     var paymentAt: Date?
@@ -35,6 +42,11 @@ struct CandidateTransaction: Identifiable, Equatable {
     var needsReview: Bool
     var sourceText: String
 
+    // Transient v0.1.1 metadata. These values are intentionally not stored in Core Data.
+    var originalProductText: String?
+    var productMatchKind: ProductMatchKind?
+    var productMatchScore: Double?
+
     init(
         id: UUID = UUID(),
         paymentAt: Date? = nil,
@@ -44,7 +56,10 @@ struct CandidateTransaction: Identifiable, Equatable {
         paymentMethod: PaymentMethod = .unknown,
         notes: String? = nil,
         needsReview: Bool = false,
-        sourceText: String = ""
+        sourceText: String = "",
+        originalProductText: String? = nil,
+        productMatchKind: ProductMatchKind? = nil,
+        productMatchScore: Double? = nil
     ) {
         self.id = id
         self.paymentAt = paymentAt
@@ -55,6 +70,9 @@ struct CandidateTransaction: Identifiable, Equatable {
         self.notes = notes
         self.needsReview = needsReview
         self.sourceText = sourceText
+        self.originalProductText = originalProductText
+        self.productMatchKind = productMatchKind
+        self.productMatchScore = productMatchScore
     }
 }
 

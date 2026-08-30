@@ -13,22 +13,23 @@
 
     <key>CFBundleName</key>
     <string>VoiceRevenue</string>
-
     <key>CFBundlePackageType</key>
     <string>APPL</string>
 
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
 
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
 
     <key>LSRequiresIPhoneOS</key>
     <true/>
 
     <key>NSMicrophoneUsageDescription</key>
     <string>Ứng dụng cần microphone để ghi nhận doanh thu bằng giọng nói.</string>
-
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Ứng dụng cần nhận dạng giọng nói tiếng Việt để chuyển lời nói thành giao dịch.</string>
 

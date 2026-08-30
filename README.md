@@ -1,116 +1,143 @@
-# VoiceRevenue v0.1
+# VoiceRevenue v0.1.1
 
 VoiceRevenue is a Vietnamese-first, local-first iPhone app for recording store revenue by voice. It is **free and open source (MIT)** and intentionally avoids paid APIs, advertising, analytics, tracking, subscriptions, and maintainer-controlled servers.
 
-## What v0.1 does
+## What v0.1.1 does
 
 1. Records audio with `AVFoundation`.
-2. Transcribes Vietnamese using Apple's `Speech` framework (`vi-VN`).
-3. Lets the user edit the transcript.
-4. Parses candidate transactions locally with deterministic Swift rules.
-5. Requires human review before saving accounting data.
-6. Stores confirmed transactions locally with Core Data.
-7. Calculates today's local revenue and transaction count.
-8. Optionally syncs confirmed transactions to a Google Sheet through a user-owned Google Apps Script Web App.
+2. Transcribes Vietnamese using Apple's `Speech` framework (`vi-VN`) with an **accuracy-first automatic mode**.
+3. Uses up to 100 local product names as `contextualStrings` hints for Apple Speech and uses the `.dictation` task hint.
+4. When Apple's online-capable recognition fails, retries the same recording on-device if that recognizer is supported on the iPhone.
+5. Keeps Vietnamese diacritics in final customer/product data; accent-stripped normalization is internal only.
+6. Uses a local product vocabulary, learned corrections, and conservative fuzzy suggestions before human review.
+7. Parses multiple candidate transactions locally with deterministic Swift rules.
+8. Requires human review before saving accounting data.
+9. Stores confirmed transactions locally with Core Data.
+10. Calculates today's local revenue and transaction count.
+11. Exports local diagnostic logs on demand; logs are never automatically uploaded.
+12. Optionally syncs confirmed transactions to a Google Sheet through a user-owned Google Apps Script Web App.
 
 No OpenAI API, Google Cloud backend, Firebase, paid SaaS, third-party Swift package, ads, telemetry, or maintainer account is required.
 
-## Important limitation: speech is not universally offline
+## Speech accuracy policy
 
-VoiceRevenue prefers on-device Apple Speech recognition when `SFSpeechRecognizer` reports that on-device recognition is supported. On other device/OS/locale combinations, Apple Speech may require Apple's service and an Internet connection. The app never claims universal offline speech recognition.
+VoiceRevenue v0.1.1 prioritizes practical accuracy while keeping the core app at $0:
 
-If recognition is unavailable, the recording is not intentionally uploaded to any VoiceRevenue server (there is no such server), and the workflow allows manual transcript entry.
+- When Apple Speech reports its service available, the app sends an online-capable request (`requiresOnDeviceRecognition = false`). Apple may use its service; VoiceRevenue does not have a separate paid speech API account or key.
+- If that attempt fails and `vi-VN` on-device recognition is supported, the app retries the **same local recording** with `requiresOnDeviceRecognition = true`.
+- Product vocabulary phrases are passed through `contextualStrings` (capped at 100 phrases) and also used by the local parser.
+- A user-confirmed correction such as `tập gym → dập ghim` is stored locally and can be automatically applied next time.
+- Fuzzy matches remain review-required; VoiceRevenue does not silently trust a low-confidence fuzzy correction.
+
+Apple documents that on-device recognition may be less accurate than recognition that is allowed to use the network. VoiceRevenue therefore no longer forces on-device mode when online recognition is available.
+
+### Why Whisper is not bundled in v0.1.1
+
+`whisper.cpp` is open source and has an iOS example, but even its multilingual models add substantial disk/RAM cost (for example, tiny is roughly 75 MiB and base roughly 142 MiB before app overhead). On old iOS 15 devices this would materially increase IPA size, memory use, build complexity, and processing latency. WhisperKit-style integrations also commonly require newer deployment targets than this project. For v0.1.1, Apple Speech on-device remains the most practical offline fallback. A fully local Whisper option remains a possible v0.2 experiment for newer devices.
+
+## Product vocabulary
+
+Open **Settings → Từ điển mặt hàng** and enter one product per line, for example:
+
+```text
+dập ghim
+dây điện
+bấm móng tay
+ốc vít
+biển neon
+```
+
+The first 100 unique phrases are used as Apple Speech contextual hints. The local parser can use the same vocabulary to:
+
+- preserve canonical Vietnamese spelling;
+- extract multiple products into readable separate lines;
+- apply user-confirmed corrections;
+- propose conservative fuzzy matches for review.
+
+## Diagnostics
+
+Open **Settings → Diagnostics → Export Debug Log**.
+
+The exported `.jsonl` file is stored locally and can include:
+
+- app/build/iOS version;
+- speech mode and availability;
+- raw + normalized transcript;
+- contextual vocabulary count;
+- parser candidates/match information;
+- user-confirmed product corrections;
+- Google Sheets request/result/error metadata.
+
+Diagnostic logs may contain customer names, transaction amounts, products, and transcripts. They are never automatically uploaded. Only share them when you intentionally choose a destination from the iOS share sheet.
 
 ## Requirements
 
-- macOS with a compatible Xcode installation
-- iPhone/iOS 15 or later
-- Apple ID for installing a development build on a physical iPhone
+- iPhone/iOS **15.0 or later**
+- Xcode 16.4-compatible build environment (the included GitHub Actions workflow can create an unsigned iPhoneOS IPA)
+- Apple ID only for your chosen personal sideload/signing workflow
 - Google account only if optional Google Sheets sync is desired
 
-The project source targets **iOS 15.0** and Swift 5 language mode.
+The project remains in Swift 5 language mode and does not use SwiftData or iOS 16+ APIs for core features.
 
-## Build in Xcode
-
-1. Download/clone this repository on a Mac.
-2. Open `VoiceRevenue.xcodeproj`.
-3. Select the `VoiceRevenue` target.
-4. Open **Signing & Capabilities**.
-5. Select your Apple ID/Personal Team.
-6. If Xcode reports that the bundle identifier is unavailable, change `org.opensource.voicerevenue` to a unique identifier such as `com.yourname.voicerevenue`.
-7. Connect your iPhone and trust the Mac if prompted.
-8. Select the iPhone as the run destination.
-9. Build and Run.
-10. Grant Microphone and Speech Recognition permission when requested.
-
-### Free Apple ID / Personal Team
-
-Apple's free development provisioning is intended for development/personal use and has restrictions. Development-signed apps installed with a free Personal Team may need to be re-signed/reinstalled periodically according to Apple's current provisioning policy. VoiceRevenue does not require a paid Developer Program subscription for its source code or core runtime features.
-
-For long-term distribution to many devices, consult Apple's current official signing/distribution rules. Community tools such as AltStore, SideStore, or Sideloadly may provide other personal sideload workflows, but they are **not dependencies of this project** and VoiceRevenue does not use jailbreaks, exploits, or security bypasses.
-
-## End-to-end test
-
-After installing on an iPhone:
+## End-to-end local test
 
 1. Open VoiceRevenue.
-2. Tap **Ghi doanh thu**.
-3. Say, for example:
-   `Lúc 7 giờ tối anh Nam thanh toán 350 nghìn tiền cái biển neon.`
-4. Stop recording.
-5. Check/edit the transcript.
-6. Tap **Phân tích giao dịch**.
-7. Verify customer, product, amount and time.
-8. Edit any ambiguous field.
-9. Tap **Xác nhận giao dịch**.
-10. Confirm the Home screen revenue increased and the transaction appears in History.
+2. Open **Settings → Từ điển mặt hàng** and make sure your real products are listed.
+3. Tap **Ghi doanh thu**.
+4. Say: `Lúc 7 giờ tối anh Nam thanh toán 350 nghìn tiền biển neon bằng chuyển khoản.`
+5. Tap the large **Dừng ghi âm** button.
+6. Check/edit the transcript.
+7. Tap **Phân tích giao dịch**.
+8. Review customer/product/amount/time/method.
+9. Confirm.
+10. Confirm the transaction appears in History and today's revenue changes.
+
+Suggested recognition-correction test:
+
+```text
+Say: dập ghim năm mươi nghìn
+Possible Apple transcript: tập gym năm mươi nghìn
+Expected: vocabulary fuzzy suggestion or a previously learned correction proposes dập ghim; fuzzy proposals remain review-required.
+```
+
+Suggested multi-item test:
+
+```text
+Anh Nam trả 250 nghìn gồm dây điện 5 mét, bấm móng tay và dập ghim.
+```
+
+Expected: one transaction with a readable multi-line product field.
 
 Suggested multi-transaction test:
 
-`Anh Nam 300 nghìn biển A, chị Hoa 500 nghìn biển B, anh Minh 1 triệu biển C.`
+```text
+Anh Nam 50 nghìn ốc vít, chị Hương 120 nghìn dây điện.
+```
 
-Suggested correction test:
-
-`Anh Nam 350 nghìn, à không Nam 380 nghìn.`
-
-The local parser is deliberately conservative. Always review accounting data.
-
-## Parser coverage in v0.1
-
-Examples intentionally covered include:
-
-- `350 nghìn`, `350 ngàn`, `350k`, `350.000`
-- `1 triệu`, `1 triệu 2`, `1 triệu 200`, `1 triệu rưỡi`
-- `một triệu hai`, `một củ hai`, `hai củ rưỡi`
-- `ba trăm rưỡi`, `ba trăm năm mươi nghìn`
-- `7 giờ tối`, `7 rưỡi tối`, `19:30`, `19 giờ 30`
-- honorific customer patterns such as `anh Nam`, `chị Hương`, `cô Lan`, `chú Minh`, `bạn An`
-- payment methods `chuyển khoản`, `tiền mặt`, `bank transfer`, `cash`
-- multiple transactions in one transcript
-- basic same-customer explicit amount correction
-
-This is not a general Vietnamese-language AI model. Unknown or ambiguous inputs should be edited during Review.
+Expected: two candidate transactions.
 
 ## Optional Google Sheets sync
 
 VoiceRevenue works fully without Google Sheets.
 
-To enable sync:
+1. Create/open the target Google Sheet.
+2. In that Sheet choose **Extensions → Apps Script**.
+3. Copy `google-apps-script/Code.gs` into the editor and save.
+4. In the Apps Script function selector choose **`setup`**, click **Run**, and authorize it. Run `setup()` once before deploying. It stores the target spreadsheet ID in Script Properties and creates the `Transactions` tab if needed.
+5. Choose **Deploy → New deployment → Web app**.
+6. Configure the web app to execute as the deploying user/owner.
+7. Because VoiceRevenue intentionally has no Google OAuth flow, the Web App must be callable without interactive sign-in. Use the anonymous-access option when your Google account/domain offers it.
+8. Deploy and copy the versioned URL ending in `/exec`.
+9. In VoiceRevenue open **Settings → Google Sheets**.
+10. Paste the `/exec` URL and tap **Kiểm tra kết nối**.
+11. A successful health check confirms that the endpoint is VoiceRevenue v0.1.1 and can access/create the `Transactions` sheet.
+12. Use **Đồng bộ lại X giao dịch** for pending/failed rows.
 
-1. Create a Google Sheet.
-2. In it, open **Extensions → Apps Script**.
-3. Copy `google-apps-script/Code.gs` into the Apps Script editor.
-4. Save and deploy it as a Web App.
-5. Configure the deployment/access appropriate for your personal environment.
-6. Copy the deployed `/exec` URL.
-7. In VoiceRevenue open **Settings**.
-8. Paste the URL into **Apps Script Web App URL**.
-9. Tap **Kiểm tra kết nối**.
-10. Tap **Thử đồng bộ lại** for pending transactions.
+`setup()` is required because Google documents that active-container methods such as `getActiveSpreadsheet()` are not available to a bound script when it executes as a Web App. The setup step captures the sheet ID while run from the editor; the deployed endpoint then reopens that exact spreadsheet with `SpreadsheetApp.openById(...)`.
 
-The Apps Script creates a `Transactions` sheet and rejects duplicate `transaction_id` rows.
+Do not use a `/dev` Test deployment URL. `/dev` is reserved for Apps Script development testing and requires script-editor access.
 
-Google Apps Script and Google Sheets are Google services and have their own quotas/policies. They are optional; a failure never deletes the local transaction.
+If a Workspace administrator does not permit anonymous Web Apps, this zero-OAuth sync architecture cannot operate with that account. VoiceRevenue remains fully usable local-only.
 
 ## Data & privacy
 
@@ -118,15 +145,13 @@ See [PRIVACY.md](PRIVACY.md).
 
 Core principles:
 
-- local Core Data is the app's source of truth;
+- local Core Data is the app source of truth;
 - no maintainer backend;
-- no ads;
-- no analytics;
-- no tracking;
-- no third-party crash reporting;
-- no API keys;
-- no service-account credentials;
-- no user account required by VoiceRevenue.
+- no ads, analytics, tracking, or remote telemetry;
+- no project API key or service-account credential;
+- diagnostic logs stay local until the user exports them;
+- Apple Speech may send audio to Apple services when online-capable recognition is used;
+- Google Sheets sync sends confirmed transaction data only to the Apps Script URL configured by the user.
 
 ## Zero-cost audit
 
@@ -134,41 +159,25 @@ Core principles:
 |---|---|---:|---|---|
 | iPhone UI | SwiftUI | $0 | No | No |
 | Audio | AVFoundation | $0 | No | No |
-| Speech | Apple Speech | $0 charged by VoiceRevenue | Apple device services | No |
+| Online-capable speech | Apple Speech | No metered API bill from VoiceRevenue | Apple device services | No |
+| Offline fallback | Apple Speech on-device when supported | $0 | No | No |
+| Vocabulary/corrections | Local Swift + UserDefaults | $0 | No | No |
 | Parsing | Local Swift | $0 | No | No |
 | Database | Core Data | $0 | No | No |
+| Diagnostics | Local JSONL + iOS share sheet | $0 | No | No |
 | Networking | URLSession | $0 | No | No |
-| Revenue dashboard | Local Swift/Core Data | $0 | No | No |
-| Sheets sync | Google Apps Script + Sheets | $0 from VoiceRevenue; subject to Google quotas/policies | Google account, optional | No Swift dependency |
-| App source/license | MIT | $0 | No | No |
-| Basic device development install | Xcode + Personal Team | $0 software subscription from project | Apple ID | No |
+| Sheets sync | Google Apps Script + Sheets | $0 from VoiceRevenue; Google quotas/policies apply | Google account, optional | No Swift dependency |
+| Source/license | MIT | $0 | No | No |
 
-Hardware, a Mac capable of running Xcode, an iPhone, Internet access, and third-party account policies are outside the software project's own service cost.
+## Known limitations
 
-## Current known limitations
-
-- The environment used to generate v0.1 did not have macOS/Xcode, so the full iOS app target could not be built or archived here.
-- Parser/Foundation source was type-checked with the Swift compiler in the generation environment, and a standalone parser harness passed the core sample cases.
-- Apple Speech quality and on-device availability vary by device, iOS version, locale and network state.
-- Correction resolution is intentionally basic in v0.1.
-- Product extraction is heuristic, not AI-powered.
-- The Apps Script endpoint has no project-maintainer authentication layer. Treat the deployment URL as configuration and choose Google deployment access appropriate to your environment.
-- A Core Data migration strategy is not yet required for v0.1; schema changes in future releases must add one.
-
-## v0.2 ideas that stay free/open-source
-
-- larger deterministic Vietnamese number grammar;
-- customizable local product/customer dictionaries;
-- stronger correction resolution;
-- local fuzzy product matching;
-- recording retry queue UI;
-- local monthly summaries;
-- CSV export/import;
-- optional fully local open-source STT on sufficiently capable devices, without making it a requirement for old iPhones;
-- improved duplicate/sync reconciliation;
-- accessibility and localization improvements.
-
-Paid cloud migration is intentionally not on the roadmap for core functionality.
+- Apple Speech quality, online service availability, and on-device `vi-VN` support vary by device/iOS/network.
+- Setting `requiresOnDeviceRecognition = false` allows online-backed recognition but does not expose a public API proving whether Apple actually processed a specific request on a server; VoiceRevenue logs this mode as `online` to mean **online-capable/preferred**.
+- Contextual vocabulary improves likelihood, not certainty.
+- Fuzzy matching is intentionally conservative and still requires human review.
+- Product segmentation remains deterministic rather than a general-language AI model.
+- Google Apps Script access options can be restricted by Google Workspace administrators.
+- The generation environment for this patch does not contain macOS/Xcode; GitHub Actions remains the authoritative full iOS build/test environment.
 
 ## License
 

@@ -12,14 +12,38 @@ struct RecordingView: View {
     var body: some View {
         VStack(spacing: 30) {
             Spacer()
-            Image(systemName: "waveform.circle.fill").font(.system(size: 90)).foregroundColor(.red)
-            Text(recorder.elapsed.formatted(.number.precision(.fractionLength(1))) + " s").font(.title.monospacedDigit())
-            Text("Đang ghi…").font(.headline)
+
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 90))
+                .foregroundColor(.red)
+
+            Text(recorder.elapsed.formatted(.number.precision(.fractionLength(1))) + " s")
+                .font(.title.monospacedDigit())
+
+            Text(model.isProcessingRecording ? "Đang xử lý…" : "Đang ghi…")
+                .font(.headline)
+
             Spacer()
-            HStack(spacing: 16) {
-                Button("Hủy") { model.cancelRecording() }.buttonStyle(.bordered)
-                Button("Dừng") { Task { await model.stopAndTranscribe() } }.buttonStyle(.borderedProminent)
+
+            Button {
+                Task { await model.stopAndTranscribe() }
+            } label: {
+                Label(
+                    model.isProcessingRecording ? "Đang xử lý…" : "Dừng ghi âm",
+                    systemImage: "stop.fill"
+                )
+                .font(.title3.bold())
+                .frame(maxWidth: .infinity, minHeight: 58)
             }
-        }.padding()
+            .buttonStyle(.borderedProminent)
+            .disabled(model.isProcessingRecording)
+
+            Button("Hủy") {
+                model.cancelRecording()
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isProcessingRecording)
+        }
+        .padding()
     }
 }

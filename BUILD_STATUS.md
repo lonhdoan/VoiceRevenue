@@ -1,10 +1,24 @@
-# v0.1 verification status
+# Build status — VoiceRevenue v0.1.1 patch
 
-- Foundation parser/model type-check with Swift compiler: **PASS**
-- Standalone parser harness for representative money, multi-transaction and correction cases: **PASS**
-- XCTest suite authored: **YES** (30+ assertions/cases across parser behavior)
-- Full iOS Xcode build: **NOT RUN** — generation environment is Linux and has no Xcode/iOS SDK
-- iPhone simulator/device smoke test: **NOT RUN** — requires macOS/Xcode
-- IPA archive/export: **NOT RUN** — requires macOS/Xcode and signing identity/device provisioning
+Generated/validated in a Linux environment without Xcode.
 
-Do not treat this file as a claim that the complete iOS app has compiled until `xcodebuild` or Xcode succeeds on a Mac.
+## Verified here
+
+- Pure Foundation parser/model source type-checks with Swift 6.2.1.
+- Standalone parser harness passes v0.1.1 cases for:
+  - Vietnamese diacritic preservation;
+  - `tập gym` → `dập ghim` fuzzy suggestion;
+  - learned correction;
+  - multi-item readable product output;
+  - multi-transaction segmentation;
+  - explicit amount correction;
+  - repeated-amount punctuation splitting.
+- `swiftc -parse` succeeds across all Swift source files (syntax-level validation only; Linux cannot resolve iOS frameworks for a full type-check).
+- `Info.plist` remains valid XML and reports app version `0.1.1` / build `2`.
+- `VoiceRevenue.xcodeproj/project.pbxproj` still contains `IPHONEOS_DEPLOYMENT_TARGET = 15.0`.
+- No Core Data schema changes were made.
+- No third-party Swift packages or paid APIs were added.
+
+## Authoritative next verification
+
+Push the patch to GitHub and run the existing **VoiceRevenue - Phase 3 Unsigned IPA** workflow on the new commit. That macOS/Xcode 16.4 job remains the authoritative full iPhoneOS compile/package check.

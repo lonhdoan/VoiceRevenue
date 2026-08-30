@@ -1,3 +1,4 @@
+import CoreData
 import XCTest
 @testable import VoiceRevenue
 
@@ -48,7 +49,7 @@ final class ParserTests: XCTestCase {
         }
     }
 
-    func testCustomerCases() {
+    func testCustomerCasesPreserveVietnamese() {
         let cases: [(String, String)] = [
             ("anh Nam trả tiền", "Nam"),
             ("chị Hương thanh toán", "Hương"),
@@ -69,12 +70,63 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(TransactionParser.extractPaymentMethod(from: "không nói"), .unknown)
     }
 
+    func testDiacriticsArePreservedInProductOutput() {
+        let values = TransactionParser.parse("Anh Nam 50 nghìn dây điện")
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values.first?.product, "dây điện")
+        XCTAssertNotEqual(values.first?.product, "day dien")
+    }
+
+    func testVocabularyFuzzySuggestionForSpeechError() {
+        let values = TransactionParser.parse(
+            "tập gym năm mươi nghìn",
+            vocabulary: ["dập ghim"]
+        )
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values.first?.product, "dập ghim")
+        XCTAssertEqual(values.first?.productMatchKind, .fuzzySuggestion)
+        XCTAssertTrue(values.first?.needsReview ?? false)
+    }
+
+    func testLearnedCorrectionAutoApplies() {
+        let values = TransactionParser.parse(
+            "tập gym năm mươi nghìn",
+            vocabulary: ["dập ghim"],
+            corrections: ["tap gym": "dập ghim"]
+        )
+        XCTAssertEqual(values.first?.product, "dập ghim")
+        XCTAssertEqual(values.first?.productMatchKind, .learnedCorrection)
+    }
+
+    func testMultipleItemsStayOneTransactionAndAreReadable() {
+        let values = TransactionParser.parse(
+            "Anh Nam trả 250 nghìn gồm dây điện 5 mét, bấm móng tay và dập ghim.",
+            vocabulary: ["dập ghim", "dây điện", "bấm móng tay", "ốc vít"]
+        )
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values.first?.amountVND, 250000)
+        XCTAssertEqual(values.first?.product, "dây điện 5 mét\nbấm móng tay\ndập ghim")
+    }
+
     func testMultipleTransactions() {
-        let values = TransactionParser.parse("Anh Nam 300 nghìn biển A, chị Hoa 500 nghìn biển B, anh Minh 1 triệu biển C")
-        XCTAssertEqual(values.count, 3)
-        XCTAssertEqual(values[0].amountVND, 300000)
-        XCTAssertEqual(values[1].amountVND, 500000)
-        XCTAssertEqual(values[2].amountVND, 1000000)
+        let values = TransactionParser.parse(
+            "Anh Nam 50 nghìn ốc vít, chị Hương 120 nghìn dây điện",
+            vocabulary: ["ốc vít", "dây điện"]
+        )
+        XCTAssertEqual(values.count, 2)
+        XCTAssertEqual(values[0].amountVND, 50000)
+        XCTAssertEqual(values[0].product, "ốc vít")
+        XCTAssertEqual(values[1].amountVND, 120000)
+        XCTAssertEqual(values[1].product, "dây điện")
+    }
+
+    func testRepeatedAmountsWithoutCustomerCanSplitAtPunctuation() {
+        let values = TransactionParser.parse(
+            "50 nghìn ốc vít, 80 nghìn dập ghim",
+            vocabulary: ["ốc vít", "dập ghim"]
+        )
+        XCTAssertEqual(values.count, 2)
+        XCTAssertTrue(values.allSatisfy { $0.needsReview })
     }
 
     func testExplicitCorrection() {
@@ -90,8 +142,145 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(values.first?.needsReview ?? false)
     }
 
+
+    func testSpeechRecognitionPlannerOnlineThenOnDeviceFallback() {
+        XCTAssertEqual(
+            SpeechRecognitionPlanner.orderedModes(
+                networkAvailable: true,
+                recognizerAvailable: true,
+                supportsOnDevice: true
+            ),
+            [.online, .onDeviceFallback]
+        )
+        XCTAssertEqual(
+            SpeechRecognitionPlanner.orderedModes(
+                networkAvailable: false,
+                recognizerAvailable: false,
+                supportsOnDevice: true
+            ),
+            [.onDeviceFallback]
+        )
+    }
+
     func testAmbiguousTimeNeedsReview() {
         let values = TransactionParser.parse("lúc 7 giờ anh Nam 350 nghìn tiền biển neon")
         XCTAssertTrue(values.first?.needsReview ?? false)
+    }
+}
+
+final class MockURLProtocol: URLProtocol {
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+final class GoogleSheetsSyncTests: XCTestCase {
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    @MainActor
+    func testRejectsMalformedAndDevURLs() async {
+        let service = GoogleSheetsSyncService(session: makeSession())
+        service.webAppURLString = "http://example.com/test"
+        XCTAssertFalse(await service.testConnection())
+        XCTAssertNotNil(service.lastError)
+
+        service.webAppURLString = "https://script.google.com/macros/s/abc/dev"
+        XCTAssertFalse(await service.testConnection())
+        XCTAssertTrue(service.lastError?.contains("/dev") ?? false)
+    }
+
+    @MainActor
+    func testValidPing() async {
+        MockURLProtocol.requestHandler = { request in
+            let body = #"{"ok":true,"pong":true,"service":"VoiceRevenue","version":"0.1.1","sheet_access":true}"#.data(using: .utf8)!
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, body)
+        }
+        let service = GoogleSheetsSyncService(session: makeSession())
+        service.webAppURLString = "https://script.google.com/macros/s/abc/exec"
+        XCTAssertTrue(await service.testConnection())
+        XCTAssertEqual(service.connectionStatus, .connected)
+    }
+
+    @MainActor
+    func testHTTP403AndNonJSONAndRemoteError() async {
+        let service = GoogleSheetsSyncService(session: makeSession())
+        service.webAppURLString = "https://script.google.com/macros/s/abc/exec"
+
+        MockURLProtocol.requestHandler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!, Data("Forbidden".utf8))
+        }
+        XCTAssertFalse(await service.testConnection())
+        XCTAssertTrue(service.lastError?.contains("403") ?? false)
+
+        MockURLProtocol.requestHandler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html"])!, Data("<html>Sign in</html>".utf8))
+        }
+        XCTAssertFalse(await service.testConnection())
+        XCTAssertTrue(service.lastError?.contains("đăng nhập") ?? false)
+
+        MockURLProtocol.requestHandler = { request in
+            let body = #"{"ok":false,"error":"sheet denied"}"#.data(using: .utf8)!
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        XCTAssertFalse(await service.testConnection())
+    }
+
+    @MainActor
+    func testSuccessfulAppendDuplicateOfflineAndRetry() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let repository = TransactionRepository(context: context)
+        try repository.save(
+            CandidateTransaction(amountVND: 50000, customerName: "Nam", product: "ốc vít"),
+            transcript: "Anh Nam 50 nghìn ốc vít"
+        )
+        guard let item = repository.transactions.first else {
+            XCTFail("Missing transaction")
+            return
+        }
+
+        let service = GoogleSheetsSyncService(session: makeSession())
+        service.webAppURLString = "https://script.google.com/macros/s/abc/exec"
+
+        MockURLProtocol.requestHandler = { request in
+            let body = #"{"ok":true,"duplicate":false}"#.data(using: .utf8)!
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        XCTAssertTrue(await service.sync(item, context: context))
+        XCTAssertEqual(item.syncStatus, SyncStatus.synced.rawValue)
+
+        item.syncStatus = SyncStatus.pending.rawValue
+        MockURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+        XCTAssertFalse(await service.sync(item, context: context))
+        XCTAssertEqual(item.syncStatus, SyncStatus.failed.rawValue)
+
+        MockURLProtocol.requestHandler = { request in
+            let body = #"{"ok":true,"duplicate":true}"#.data(using: .utf8)!
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        XCTAssertTrue(await service.sync(item, context: context))
+        XCTAssertEqual(item.syncStatus, SyncStatus.synced.rawValue)
     }
 }

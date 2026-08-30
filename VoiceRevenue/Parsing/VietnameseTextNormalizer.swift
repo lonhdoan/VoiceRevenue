@@ -8,4 +8,14 @@ enum VietnameseTextNormalizer {
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    static func normalizedVocabulary(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalize(trimmed)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { return nil }
+            return trimmed
+        }
+    }
 }

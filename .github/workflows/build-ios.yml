@@ -1,0 +1,191 @@
+name: VoiceRevenue - Phase 2 Diagnostics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics:
+    name: Inspect Xcode Project
+    runs-on: macos-15
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: System information
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "=== SYSTEM ==="
+          echo "========================================"
+
+          echo "Current directory:"
+          pwd
+
+          echo ""
+          echo "macOS version:"
+          sw_vers
+
+          echo ""
+          echo "Kernel:"
+          uname -a
+
+          echo ""
+          echo "GitHub runner:"
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=$RUNNER_ARCH"
+
+          echo ""
+          echo "Repository root contents:"
+          ls -la
+
+      - name: Verify Xcode project
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "=== PROJECT FILE ==="
+          echo "========================================"
+
+          if [ ! -d "VoiceRevenue.xcodeproj" ]; then
+            echo "::error::ERROR: VoiceRevenue.xcodeproj not found at repository root"
+            echo ""
+            echo "Repository root actually contains:"
+            ls -la
+            exit 1
+          fi
+
+          echo "OK: VoiceRevenue.xcodeproj exists at repository root"
+
+          if [ ! -f "VoiceRevenue.xcodeproj/project.pbxproj" ]; then
+            echo "::error::ERROR: VoiceRevenue.xcodeproj/project.pbxproj is missing"
+            exit 1
+          fi
+
+          echo "OK: project.pbxproj exists"
+
+          echo ""
+          echo "Xcode project contents:"
+          find VoiceRevenue.xcodeproj -maxdepth 2 -type f -print
+
+      - name: Xcode and Swift versions
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "=== XCODE ==="
+          echo "========================================"
+
+          echo "Selected developer directory:"
+          xcode-select -p
+
+          echo ""
+          echo "Xcode version:"
+          xcodebuild -version
+
+          echo ""
+          echo "Swift version:"
+          swift --version
+
+          echo ""
+          echo "xcodebuild executable:"
+          xcrun --find xcodebuild
+
+      - name: Available Apple SDKs
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "=== AVAILABLE SDKs ==="
+          echo "========================================"
+
+          xcodebuild -showsdks
+
+          echo ""
+          echo "Current iPhoneOS SDK path:"
+          xcrun --sdk iphoneos --show-sdk-path || true
+
+          echo ""
+          echo "Current iPhoneOS SDK version:"
+          xcrun --sdk iphoneos --show-sdk-version || true
+
+      - name: Inspect Xcode project
+        shell: bash
+        run: |
+          set -o pipefail
+
+          echo "========================================"
+          echo "=== XCODEBUILD LIST ==="
+          echo "========================================"
+
+          xcodebuild \
+            -list \
+            -project VoiceRevenue.xcodeproj \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild-list.txt"
+
+          echo ""
+          echo "========================================"
+          echo "=== SCHEME CHECK ==="
+          echo "========================================"
+
+          if awk '
+            /Schemes:/ {
+              inSchemes = 1
+              next
+            }
+
+            inSchemes && /^[[:space:]]+VoiceRevenue[[:space:]]*$/ {
+              found = 1
+            }
+
+            END {
+              exit found ? 0 : 1
+            }
+          ' "$RUNNER_TEMP/xcodebuild-list.txt"
+          then
+            echo "FOUND: scheme VoiceRevenue"
+
+            echo ""
+            echo "========================================"
+            echo "=== IMPORTANT BUILD SETTINGS ==="
+            echo "========================================"
+
+            set +e
+
+            xcodebuild \
+              -showBuildSettings \
+              -project VoiceRevenue.xcodeproj \
+              -scheme VoiceRevenue \
+              2>&1 \
+              | tee "$RUNNER_TEMP/build-settings-full.txt"
+
+            SHOW_SETTINGS_STATUS=${PIPESTATUS[0]}
+
+            set -e
+
+            echo ""
+            echo "Important settings:"
+
+            grep -E \
+              '^[[:space:]]+(TARGET_NAME|PRODUCT_NAME|PRODUCT_BUNDLE_IDENTIFIER|WRAPPER_NAME|CONFIGURATION|SDKROOT|SUPPORTED_PLATFORMS|IPHONEOS_DEPLOYMENT_TARGET|ARCHS|VALID_ARCHS|INFOPLIST_FILE|CODE_SIGN_STYLE|CODE_SIGNING_ALLOWED|CODE_SIGNING_REQUIRED)[[:space:]]*=' \
+              "$RUNNER_TEMP/build-settings-full.txt" \
+              || true
+
+            if [ "$SHOW_SETTINGS_STATUS" -ne 0 ]; then
+              echo "::warning::xcodebuild -showBuildSettings returned a non-zero status. PHASE 2 diagnostics will continue."
+            fi
+          else
+            echo "::warning::Scheme 'VoiceRevenue' was NOT found."
+            echo "Do not build yet. Use the XCODEBUILD LIST output above to determine the real scheme."
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "=== PHASE 2 COMPLETE ==="
+          echo "========================================"
+
+          echo "Diagnostics finished."
+          echo "No app was built."
+          echo "No signing was attempted."
+          echo "No certificate or provisioning profile was used."

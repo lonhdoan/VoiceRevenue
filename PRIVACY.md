@@ -2,7 +2,7 @@
 
 VoiceRevenue is local-first. Confirmed transactions are stored on the iPhone with Core Data. The project contains no ads, analytics SDK, telemetry, crash-reporting SaaS, maintainer server, or maintainer API key.
 
-Audio is recorded locally. VoiceRevenue v0.1.2 uses Apple's Speech framework in an accuracy-first mode: when Apple's recognition service is available, the request is allowed to use network-backed recognition; if that fails and the device supports `vi-VN` on-device recognition, the same local recording is retried on-device. VoiceRevenue has no separate paid speech API account. Apple Speech behavior is subject to Apple's platform and privacy policies.
+Audio is recorded locally. VoiceRevenue v0.1.4 uses Apple's Speech framework in an accuracy-first live mode. Microphone PCM buffers are sent to Apple Speech while also being saved locally; if live recognition produces no usable transcript, the same saved recording is replayed through a fresh Apple Speech buffer request. If that also fails and the device supports `vi-VN` on-device recognition, the same recording is retried on-device. VoiceRevenue has no separate paid speech API account. Apple Speech behavior is subject to Apple's platform and privacy policies.
 
 Product vocabulary and learned speech/product corrections are stored locally in UserDefaults.
 
@@ -13,4 +13,4 @@ Google Sheets sync is optional. If enabled, confirmed transaction data is sent o
 Users should review Apple's and Google's own privacy terms for services they choose to use.
 
 
-The bundled v0.1.2 product catalog is derived from the store inventory workbook and remains inside the application. The full catalog is used locally for matching; only a bounded contextual shortlist may be supplied to Apple Speech as recognition hints.
+The bundled v0.1.4 product catalog is derived from the store inventory workbook and remains inside the application. The full catalog is used locally for matching; only a bounded contextual shortlist may be supplied to Apple Speech as recognition hints.

@@ -167,6 +167,35 @@ final class ParserTests: XCTestCase {
         )
     }
 
+    func testLiveTranscriptSelectorPrefersFinalAndKeepsUsefulPartial() {
+        XCTAssertEqual(
+            LiveTranscriptSelector.select(final: "dây điện năm mươi nghìn", partial: "dây điện"),
+            LiveTranscriptSelection(text: "dây điện năm mươi nghìn", source: "final")
+        )
+        XCTAssertEqual(
+            LiveTranscriptSelector.select(final: nil, partial: "  dây điện  "),
+            LiveTranscriptSelection(text: "dây điện", source: "partial")
+        )
+        XCTAssertNil(LiveTranscriptSelector.select(final: "   ", partial: "\n"))
+    }
+
+    @MainActor
+    func testDiagnosticExportKeepsPriorSession() throws {
+        let first = DiagnosticLogger()
+        first.clearLogs()
+        first.log(event: "test.previous.session", payload: ["value": "one"])
+
+        let second = DiagnosticLogger()
+        second.log(event: "test.current.session", payload: ["value": "two"])
+        guard let export = second.exportURL() else {
+            XCTFail("Missing diagnostic export")
+            return
+        }
+        let text = try String(contentsOf: export, encoding: .utf8)
+        XCTAssertTrue(text.contains("test.previous.session"))
+        XCTAssertTrue(text.contains("test.current.session"))
+    }
+
 
     func testCatalogResourceLoadsAtScale() {
         let catalog = ProductCatalogLoader.loadBundled()

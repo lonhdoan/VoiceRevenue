@@ -19,16 +19,44 @@ struct AudioRecordingMetadata: Equatable {
     }
 }
 
+private final class AudioCaptureSink {
+    private let lock = NSLock()
+    private var file: AVAudioFile?
+    private let consumer: ((AVAudioPCMBuffer) -> Void)?
+
+    init(file: AVAudioFile, consumer: ((AVAudioPCMBuffer) -> Void)?) {
+        self.file = file
+        self.consumer = consumer
+    }
+
+    func consume(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let targetFile = file
+        lock.unlock()
+        try? targetFile?.write(from: buffer)
+        consumer?(buffer)
+    }
+
+    func close() {
+        lock.lock()
+        file = nil
+        lock.unlock()
+    }
+}
+
 @MainActor
-final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
+final class AudioRecorder: NSObject, ObservableObject {
     enum State: Equatable { case idle, recording, recorded(URL), failed(String) }
 
     @Published private(set) var state: State = .idle
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var lastRecordingURL: URL?
 
-    private var recorder: AVAudioRecorder?
+    private var audioEngine: AVAudioEngine?
+    private var captureSink: AudioCaptureSink?
     private var timer: Timer?
+    private var recordingStartedAt: Date?
+    private var activeRecordingURL: URL?
     private let fileManager = FileManager.default
     private let recordingsDirectory: URL
 
@@ -49,76 +77,107 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         }
     }
 
-    func start() async {
+    /// Starts a single AVAudioEngine microphone pipeline.
+    /// The same PCM buffers are written to a local CAF file and optionally forwarded to live Speech.
+    func start(bufferConsumer: ((AVAudioPCMBuffer) -> Void)? = nil) async {
         guard await requestPermission() else {
             state = .failed("Quyền microphone bị từ chối.")
             return
         }
 
         do {
+            stopEngineIfNeeded()
+
             let session = AVAudioSession.sharedInstance()
-            // .spokenAudio is a playback-oriented mode. .default is the safe recording mode here.
-            try session.setCategory(.record, mode: .default, options: [])
-            try session.setActive(true)
+            try session.setCategory(.record, mode: .measurement, options: [])
+            try session.setActive(true, options: [])
 
             try fileManager.createDirectory(at: recordingsDirectory, withIntermediateDirectories: true)
-            let url = recordingsDirectory
-                .appendingPathComponent("VoiceRevenue-Recording-\(UUID().uuidString).m4a")
 
-            // Short accounting recordings favor capture fidelity over tiny file size.
-            let settings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: 44_100,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 96_000,
-                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-            ]
-
-            let recorder = try AVAudioRecorder(url: url, settings: settings)
-            recorder.delegate = self
-            guard recorder.prepareToRecord(), recorder.record() else {
+            let engine = AVAudioEngine()
+            let inputNode = engine.inputNode
+            let recordingFormat = inputNode.outputFormat(forBus: 0)
+            guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
                 throw NSError(
                     domain: "VoiceRevenue.AudioRecorder",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Không thể bắt đầu ghi âm."]
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Microphone không trả về audio format hợp lệ."]
                 )
             }
 
-            self.recorder = recorder
+            let url = recordingsDirectory
+                .appendingPathComponent("VoiceRevenue-Recording-\(UUID().uuidString).caf")
+            let audioFile = try AVAudioFile(forWriting: url, settings: recordingFormat.settings)
+            activeRecordingURL = url
+            let sink = AudioCaptureSink(file: audioFile, consumer: bufferConsumer)
+
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+                sink.consume(buffer)
+            }
+
+            engine.prepare()
+            try engine.start()
+
+            audioEngine = engine
+            captureSink = sink
+            recordingStartedAt = Date()
             elapsed = 0
             state = .recording
+
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.elapsed = recorder.currentTime }
+                Task { @MainActor in
+                    guard let self, let started = self.recordingStartedAt else { return }
+                    self.elapsed = Date().timeIntervalSince(started)
+                }
             }
         } catch {
+            stopEngineIfNeeded()
             state = .failed(error.localizedDescription)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
 
     func stop() {
-        guard let recorder else { return }
-        recorder.stop()
+        guard case .recording = state, let engine = audioEngine else { return }
+
+        let url = activeRecordingURL
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        captureSink?.close()
+        captureSink = nil
+        audioEngine = nil
+
         timer?.invalidate()
         timer = nil
-        let url = recorder.url
-        state = .recorded(url)
-        lastRecordingURL = url
-        self.recorder = nil
-        pruneRecordings(keeping: url)
-        try? AVAudioSession.sharedInstance().setActive(false)
+        if let started = recordingStartedAt {
+            elapsed = Date().timeIntervalSince(started)
+        }
+        recordingStartedAt = nil
+        activeRecordingURL = nil
+
+        if let url, fileManager.fileExists(atPath: url.path) {
+            state = .recorded(url)
+            lastRecordingURL = url
+            pruneRecordings(keeping: url)
+        } else {
+            state = .failed("Không tìm thấy file ghi âm sau khi dừng.")
+        }
+
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     func cancel() {
-        guard let recorder else { state = .idle; return }
-        let url = recorder.url
-        recorder.stop()
-        timer?.invalidate()
-        timer = nil
-        self.recorder = nil
-        try? fileManager.removeItem(at: url)
+        let possibleURL = activeRecordingURL
+        stopEngineIfNeeded()
+        if let possibleURL {
+            try? fileManager.removeItem(at: possibleURL)
+        }
         state = .idle
-        try? AVAudioSession.sharedInstance().setActive(false)
+        elapsed = 0
+        recordingStartedAt = nil
+        activeRecordingURL = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     func metadata(for url: URL) -> AudioRecordingMetadata? {
@@ -127,9 +186,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         guard let file = try? AVAudioFile(forReading: url) else {
             return AudioRecordingMetadata(
                 durationSeconds: elapsed,
-                sampleRate: 44_100,
-                channelCount: 1,
-                formatID: UInt32(kAudioFormatMPEG4AAC),
+                sampleRate: 0,
+                channelCount: 0,
+                formatID: nil,
                 fileSizeBytes: Int64(size)
             )
         }
@@ -151,6 +210,18 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         )
     }
 
+    private func stopEngineIfNeeded() {
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        captureSink?.close()
+        captureSink = nil
+        audioEngine = nil
+        timer?.invalidate()
+        timer = nil
+    }
+
     private func newestRecordingURL() -> URL? {
         guard let files = try? fileManager.contentsOfDirectory(
             at: recordingsDirectory,
@@ -158,7 +229,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             options: [.skipsHiddenFiles]
         ) else { return nil }
         return files
-            .filter { $0.pathExtension.lowercased() == "m4a" }
+            .filter { ["caf", "m4a"].contains($0.pathExtension.lowercased()) }
             .max { lhs, rhs in
                 let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -172,7 +243,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return }
-        for file in files where file != current && file.pathExtension.lowercased() == "m4a" {
+        for file in files where file != current && ["caf", "m4a"].contains(file.pathExtension.lowercased()) {
             try? fileManager.removeItem(at: file)
         }
     }

@@ -21,6 +21,7 @@ struct SettingsView: View {
     @ObservedObject private var vocabulary: ProductVocabularyStore
     @ObservedObject private var sync: GoogleSheetsSyncService
     @ObservedObject private var repository: TransactionRepository
+    @ObservedObject private var speech: SpeechRecognizerService
     @Environment(\.dismiss) private var dismiss
     @State private var connectionMessage = ""
     @State private var shareFile: ShareFile?
@@ -30,6 +31,7 @@ struct SettingsView: View {
         _vocabulary = ObservedObject(wrappedValue: model.vocabulary)
         _sync = ObservedObject(wrappedValue: model.sync)
         _repository = ObservedObject(wrappedValue: model.repository)
+        _speech = ObservedObject(wrappedValue: model.speech)
     }
 
     var body: some View {
@@ -39,24 +41,48 @@ struct SettingsView: View {
                     HStack {
                         Text("vi-VN khả dụng")
                         Spacer()
-                        Text(model.speech.isAvailable ? "Có" : "Không")
+                        Text(speech.isAvailable ? "Có" : "Không")
                             .foregroundColor(.secondary)
                     }
                     HStack {
                         Text("On-device fallback")
                         Spacer()
-                        Text(model.speech.supportsOnDevice ? "Có" : "Không")
+                        Text(speech.supportsOnDevice ? "Có" : "Không")
                             .foregroundColor(.secondary)
                     }
                     HStack {
                         Text("Chế độ")
                         Spacer()
-                        Text("Online URL → audio buffer · fallback on-device")
+                        Text("Live buffer → replay buffer → on-device")
+                            .multilineTextAlignment(.trailing)
                             .foregroundColor(.secondary)
                     }
-                    Text("Hotfix iOS 15: app thử Apple Speech bằng file URL, sau đó tự thử lại cùng file qua audio buffer nếu cần. Nếu online vẫn lỗi và thiết bị hỗ trợ vi-VN on-device, app thử on-device.")
+                    Text("v0.1.4 nhận dạng trực tiếp từ microphone bằng SFSpeechAudioBufferRecognitionRequest. Nếu live không có chữ, app replay chính file audio đã lưu; on-device chỉ chạy khi iPhone báo hỗ trợ.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
+                }
+
+                Section("Lần nhận diện gần nhất") {
+                    speechStatusRow("Live Apple", speech.liveStatus)
+                    speechStatusRow("Replay Apple", speech.replayStatus)
+                    speechStatusRow("On-device Apple", speech.onDeviceStatus)
+                    speechStatusRow("Local fallback", speech.localFallbackStatus)
+                    speechStatusRow("Kết quả cuối", speech.finalStatus)
+
+                    if !speech.lastErrorDescription.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Lỗi gần nhất")
+                                .font(.subheadline.bold())
+                            if !speech.lastErrorDomain.isEmpty || !speech.lastErrorCode.isEmpty {
+                                Text("\(speech.lastErrorDomain) · \(speech.lastErrorCode)")
+                                    .font(.caption.monospaced())
+                                    .foregroundColor(.secondary)
+                            }
+                            Text(speech.lastErrorDescription)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
 
                 Section("Danh mục mặt hàng") {
@@ -72,7 +98,7 @@ struct SettingsView: View {
 
                     Text("Từ điển bổ sung")
                         .font(.subheadline)
-                    Text("Mỗi dòng một tên mặt hàng thường nói ngắn gọn. Danh mục 1.000+ sản phẩm được dùng local; chỉ shortlist tối đa 100 cụm liên quan mới được gửi cho Apple Speech.")
+                    Text("Mỗi dòng một tên mặt hàng thường nói ngắn gọn. Danh mục 1.000+ sản phẩm được dùng local; chỉ shortlist tối đa 100 cụm được gửi cho Apple Speech.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
@@ -126,16 +152,17 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundColor(sync.connectionStatus == .failed ? .red : .secondary)
                     }
-
-                    Text("Nếu URL trống/không hợp lệ, trạng thái là Chưa cấu hình. Chỉ lỗi mạng/server sau một request thật mới hiện Kết nối lỗi.")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
 
                 Section("Diagnostics") {
-                    Text("Log và audio nằm trên máy, không tự upload. File có thể chứa transcript, tên khách, sản phẩm và số tiền; chỉ chia sẻ khi bạn chủ động chọn.")
+                    Text("Log và audio nằm trên máy, không tự upload. Export Debug Log gộp tối đa 5 session gần nhất để lỗi Speech không biến mất sau khi app mở lại.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
+
+                    Button(model.isProcessingRecording ? "Đang test…" : "Test nhận diện file gần nhất") {
+                        Task { await model.testLastRecordingSpeech() }
+                    }
+                    .disabled(model.recorder.lastRecordingURL == nil || model.isProcessingRecording)
 
                     Button("Export Debug Log") {
                         model.diagnostics.log(event: "diagnostics.export.requested")
@@ -162,7 +189,7 @@ struct SettingsView: View {
                 }
 
                 Section("Quyền riêng tư") {
-                    Text("Không quảng cáo, không tracking, không telemetry. Audio được ghi local; Apple Speech có thể dùng dịch vụ Apple khi online. Giao dịch chỉ được gửi tới Apps Script do bạn tự cấu hình nếu bật đồng bộ.")
+                    Text("Không quảng cáo, không tracking, không telemetry. Audio được lưu local; Apple Speech có thể dùng dịch vụ Apple khi online. Giao dịch chỉ được gửi tới Apps Script do bạn tự cấu hình nếu bật đồng bộ.")
                 }
             }
             .navigationTitle("Cài đặt")
@@ -172,6 +199,25 @@ struct SettingsView: View {
             .sheet(item: $shareFile) { item in
                 ActivityView(activityItems: [item.url])
             }
+        }
+    }
+
+    @ViewBuilder
+    private func speechStatusRow(_ label: String, _ status: SpeechStageStatus) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(status.displayName)
+                .foregroundColor(speechStatusColor(status))
+        }
+    }
+
+    private func speechStatusColor(_ status: SpeechStageStatus) -> Color {
+        switch status {
+        case .success: return .green
+        case .failed: return .red
+        case .running: return .orange
+        case .unsupported, .notInstalled, .notRun: return .secondary
         }
     }
 

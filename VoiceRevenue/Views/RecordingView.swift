@@ -3,14 +3,16 @@ import SwiftUI
 struct RecordingView: View {
     @ObservedObject var model: AppViewModel
     @ObservedObject var recorder: AudioRecorder
+    @ObservedObject var speech: SpeechRecognizerService
 
     init(model: AppViewModel) {
         self.model = model
         self.recorder = model.recorder
+        self.speech = model.speech
     }
 
     var body: some View {
-        VStack(spacing: 30) {
+        VStack(spacing: 24) {
             Spacer()
 
             Image(systemName: "waveform.circle.fill")
@@ -20,8 +22,24 @@ struct RecordingView: View {
             Text(recorder.elapsed.formatted(.number.precision(.fractionLength(1))) + " s")
                 .font(.title.monospacedDigit())
 
-            Text(model.isProcessingRecording ? "Đang xử lý…" : "Đang ghi…")
+            Text(model.isProcessingRecording ? "Đang xử lý…" : "Đang nghe…")
                 .font(.headline)
+
+            Group {
+                let live = speech.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if live.isEmpty {
+                    Text("Nói một câu ngắn bằng tiếng Việt. Chữ nhận được sẽ xuất hiện tại đây ngay khi Apple Speech trả kết quả.")
+                        .foregroundColor(.secondary)
+                } else {
+                    Text(live)
+                        .font(.title3)
+                        .fontWeight(.medium)
+                        .textSelection(.enabled)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, minHeight: 80)
+            .padding(.horizontal)
 
             Spacer()
 

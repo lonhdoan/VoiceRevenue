@@ -159,12 +159,13 @@ final class ProductVocabularyStore: ObservableObject {
 
 @MainActor
 final class DiagnosticLogger: ObservableObject {
-    static let parserVersion = "0.1.3"
+    static let parserVersion = "0.1.4"
 
     @Published private(set) var currentLogURL: URL?
     private let directory: URL
     private let fileManager = FileManager.default
     private let isoFormatter = ISO8601DateFormatter()
+    private var sessionID = UUID().uuidString
 
     init() {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -180,13 +181,17 @@ final class DiagnosticLogger: ObservableObject {
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             "iOS": UIDevice.current.systemVersion,
             "device": UIDevice.current.model,
-            "parserVersion": Self.parserVersion
+            "parserVersion": Self.parserVersion,
+            "sessionID": sessionID
         ])
     }
 
+    /// Critical diagnostic writes are intentionally synchronous (open/write/close). Event volume is
+    /// tiny and durability matters more than micro-optimizing logging during this emergency patch.
     func log(event: String, payload: [String: String] = [:]) {
         guard let url = currentLogURL else { return }
         var object: [String: Any] = [
+            "session_id": sessionID,
             "timestamp": isoFormatter.string(from: Date()),
             "event": event,
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
@@ -203,19 +208,52 @@ final class DiagnosticLogger: ObservableObject {
               var line = String(data: data, encoding: .utf8) else { return }
         line.append("\n")
         guard let lineData = line.data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: url) {
+
+        do {
+            let handle = try FileHandle(forWritingTo: url)
             handle.seekToEndOfFile()
             handle.write(lineData)
-            try? handle.close()
+            try handle.close()
+        } catch {
+            // Do not recurse into logging. A later export will still surface prior durable events.
         }
     }
 
-    func exportURL() -> URL? { currentLogURL }
+    /// Exports up to the last five persisted sessions into one JSONL file. This fixes the v0.1.3
+    /// blind spot where exporting after an app relaunch returned only the new startup session.
+    func exportURL() -> URL? {
+        let files = sessionLogFilesNewestFirst()
+        guard !files.isEmpty else { return nil }
+
+        let selected = Array(files.prefix(5)).reversed()
+        var aggregate = Data()
+        for file in selected {
+            if let data = try? Data(contentsOf: file) {
+                aggregate.append(data)
+                if let last = aggregate.last, last != 0x0A {
+                    aggregate.append(0x0A)
+                }
+            }
+        }
+        guard !aggregate.isEmpty else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let export = fileManager.temporaryDirectory
+            .appendingPathComponent("VoiceRevenue-Diagnostic-\(formatter.string(from: Date())).jsonl")
+        do {
+            try aggregate.write(to: export, options: .atomic)
+            return export
+        } catch {
+            return nil
+        }
+    }
 
     func clearLogs() {
-        if let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
-            for file in files { try? fileManager.removeItem(at: file) }
+        for file in sessionLogFilesNewestFirst() {
+            try? fileManager.removeItem(at: file)
         }
+        sessionID = UUID().uuidString
         currentLogURL = makeSessionURL()
         if let url = currentLogURL {
             fileManager.createFile(atPath: url.path, contents: nil)
@@ -226,27 +264,35 @@ final class DiagnosticLogger: ObservableObject {
     private func makeSessionURL() -> URL {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-        return directory.appendingPathComponent("VoiceRevenue-Diagnostic-\(formatter.string(from: Date())).jsonl")
+        let shortID = String(sessionID.prefix(8))
+        return directory.appendingPathComponent(
+            "VoiceRevenue-Session-\(formatter.string(from: Date()))-\(shortID).jsonl"
+        )
     }
 
-    private func pruneLogs() {
+    private func sessionLogFilesNewestFirst() -> [URL] {
         guard let files = try? fileManager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
-        ) else { return }
+        ) else { return [] }
 
-        let sorted = files.sorted { lhs, rhs in
-            let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return l > r
-        }
+        return files
+            .filter { $0.lastPathComponent.hasPrefix("VoiceRevenue-Session-") && $0.pathExtension == "jsonl" }
+            .sorted { lhs, rhs in
+                let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return l > r
+            }
+    }
 
+    private func pruneLogs() {
+        let files = sessionLogFilesNewestFirst()
         var totalBytes = 0
-        for (index, file) in sorted.enumerated() {
-            let values = try? file.resourceValues(forKeys: [.fileSizeKey])
-            totalBytes += values?.fileSize ?? 0
-            if index >= 29 || totalBytes > 1_000_000 {
+        for (index, file) in files.enumerated() {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            totalBytes += size
+            if index >= 5 || totalBytes > 2_000_000 {
                 try? fileManager.removeItem(at: file)
             }
         }
@@ -287,15 +333,27 @@ final class AppViewModel: ObservableObject {
     func startRecording() async {
         speechFailureMessage = nil
         alertMessage = nil
-        await recorder.start()
+        transcript = ""
+        candidates = []
+
+        let liveConsumer = await speech.beginLiveRecognition(
+            contextualStrings: vocabulary.initialContextualStrings
+        )
+        await recorder.start(bufferConsumer: liveConsumer)
+
         switch recorder.state {
         case .recording:
-            diagnostics.log(event: "recording.started")
+            diagnostics.log(event: "recording.started", payload: [
+                "liveSpeechStarted": String(liveConsumer != nil),
+                "contextualCount": String(vocabulary.initialContextualStrings.count)
+            ])
             flow = .recording
         case .failed(let message):
+            speech.cancelLiveRecognition(reason: "recording_start_failed")
             diagnostics.log(event: "recording.failed", payload: ["error": message])
             alertMessage = message
         default:
+            speech.cancelLiveRecognition(reason: "recording_not_started")
             diagnostics.log(event: "recording.not_started")
         }
     }
@@ -306,15 +364,33 @@ final class AppViewModel: ObservableObject {
         defer { isProcessingRecording = false }
 
         recorder.stop()
-        guard case .recorded(let url) = recorder.state else { return }
+        guard case .recorded(let url) = recorder.state else {
+            speech.cancelLiveRecognition(reason: "recording_stop_failed")
+            speechFailureMessage = "Không lấy được file ghi âm sau khi dừng."
+            return
+        }
 
-        var audioPayload = ["file": url.lastPathComponent]
+        var audioPayload = [
+            "file": url.lastPathComponent,
+            "extension": url.pathExtension.lowercased(),
+            "fileExists": String(FileManager.default.fileExists(atPath: url.path))
+        ]
         if let metadata = recorder.metadata(for: url) {
             for (key, value) in metadata.logPayload { audioPayload[key] = value }
         }
         diagnostics.log(event: "recording.stopped", payload: audioPayload)
+        diagnostics.log(event: "recording.audio.format", payload: audioPayload)
 
-        await recognizeRecording(url: url, preferBufferFirst: false)
+        if let liveText = await speech.finishLiveRecognition(),
+           !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            acceptRecognizedText(liveText, url: url, source: "liveAudioBuffer")
+            flow = .transcript
+            return
+        }
+
+        // Live Speech produced no usable words. Replay the exact same saved audio through a fresh
+        // buffer request, then on-device only when the real device reports support.
+        await recognizeRecording(url: url, preferBufferFirst: true)
         flow = .transcript
     }
 
@@ -329,10 +405,40 @@ final class AppViewModel: ObservableObject {
         defer { isProcessingRecording = false }
         diagnostics.log(event: "speech.retry.requested", payload: [
             "file": url.lastPathComponent,
-            "strategy": "audioBufferFirst"
+            "fileExists": String(FileManager.default.fileExists(atPath: url.path)),
+            "strategy": "savedAudioBufferReplay"
         ])
         await recognizeRecording(url: url, preferBufferFirst: true)
         flow = .transcript
+    }
+
+    /// Diagnostics-only Speech test. It never parses or creates accounting candidates.
+    func testLastRecordingSpeech() async {
+        guard !isProcessingRecording else { return }
+        guard let url = recorder.lastRecordingURL else {
+            alertMessage = "Chưa có file ghi âm gần nhất để test."
+            return
+        }
+
+        isProcessingRecording = true
+        defer { isProcessingRecording = false }
+        diagnostics.log(event: "speech.diagnostic_test.requested", payload: [
+            "file": url.lastPathComponent,
+            "fileExists": String(FileManager.default.fileExists(atPath: url.path))
+        ])
+
+        let text = await speech.transcribe(
+            url: url,
+            initialContextualStrings: vocabulary.initialContextualStrings,
+            catalogProducts: vocabulary.allProducts,
+            preferBufferFirst: true
+        )
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            alertMessage = speech.lastError ?? "Test nhận diện thất bại."
+        } else {
+            alertMessage = "Speech test OK: \(trimmed)"
+        }
     }
 
     private func recognizeRecording(url: URL, preferBufferFirst: Bool) async {
@@ -357,21 +463,37 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        acceptRecognizedText(trimmed, url: url, source: speech.lastRecognitionMethod.rawValue)
+    }
+
+    private func acceptRecognizedText(_ text: String, url: URL, source: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            transcript = ""
+            candidates = []
+            speechFailureMessage = "Không thể nhận diện giọng nói."
+            diagnostics.log(event: "speech.result.rejected_empty", payload: ["source": source])
+            return
+        }
+
         transcript = trimmed
         speechFailureMessage = nil
         diagnostics.log(event: "speech.result", payload: [
             "recognitionMode": speech.lastRecognitionMode.rawValue,
             "method": speech.lastRecognitionMethod.rawValue,
+            "source": source,
             "rawTranscript": trimmed,
             "normalizedTranscript": VietnameseTextNormalizer.normalize(trimmed),
             "initialContextualCount": String(vocabulary.initialContextualStrings.count),
             "catalogCount": String(vocabulary.catalogCount),
-            "onDeviceSupported": String(speech.supportsOnDevice)
+            "onDeviceSupported": String(speech.supportsOnDevice),
+            "file": url.lastPathComponent
         ])
     }
 
     func cancelRecording() {
         recorder.cancel()
+        speech.cancelLiveRecognition(reason: "user_cancelled")
         diagnostics.log(event: "recording.cancelled")
         flow = .home
     }

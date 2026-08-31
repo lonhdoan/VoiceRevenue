@@ -1,8 +1,25 @@
 import SwiftUI
+import UIKit
+
+private struct TranscriptShareFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct TranscriptActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
 
 struct TranscriptView: View {
     @ObservedObject var model: AppViewModel
     @FocusState private var transcriptFocused: Bool
+    @State private var shareFile: TranscriptShareFile?
 
     var body: some View {
         NavigationView {
@@ -28,6 +45,28 @@ struct TranscriptView: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(model.isProcessingRecording)
+                    }
+
+                    HStack {
+                        Button("Export Debug Log") {
+                            model.diagnostics.log(event: "diagnostics.export.requested", payload: ["source": "transcript_failure"])
+                            if let url = model.diagnostics.exportURL() {
+                                shareFile = TranscriptShareFile(url: url)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Export Last Recording") {
+                            if let url = model.recorder.lastRecordingURL {
+                                model.diagnostics.log(event: "diagnostics.audio_export.requested", payload: [
+                                    "source": "transcript_failure",
+                                    "file": url.lastPathComponent
+                                ])
+                                shareFile = TranscriptShareFile(url: url)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.recorder.lastRecordingURL == nil)
                     }
                 } else {
                     Text("Kiểm tra transcript trước khi phân tích.")
@@ -55,6 +94,9 @@ struct TranscriptView: View {
             }
             .padding()
             .navigationTitle("Transcript")
+            .sheet(item: $shareFile) { item in
+                TranscriptActivityView(activityItems: [item.url])
+            }
         }
     }
 }

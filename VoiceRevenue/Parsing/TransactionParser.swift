@@ -20,12 +20,15 @@ enum TransactionParser {
         vocabulary: [String] = [],
         corrections: [String: String] = [:]
     ) -> [CandidateTransaction] {
-        let segments = TransactionSegmenter.segments(from: transcript)
+        let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return [] }
+
+        let segments = TransactionSegmenter.segments(from: cleaned)
         let candidates = segments.compactMap {
             parseSegment($0, baseDate: baseDate, vocabulary: vocabulary, corrections: corrections)
         }
         return candidates.isEmpty
-            ? [parseSegment(transcript, baseDate: baseDate, vocabulary: vocabulary, corrections: corrections)].compactMap { $0 }
+            ? [parseSegment(cleaned, baseDate: baseDate, vocabulary: vocabulary, corrections: corrections)].compactMap { $0 }
             : candidates
     }
 

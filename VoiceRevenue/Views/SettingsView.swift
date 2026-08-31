@@ -51,10 +51,10 @@ struct SettingsView: View {
                     HStack {
                         Text("Chế độ")
                         Spacer()
-                        Text("Online 2-pass · ưu tiên chính xác")
+                        Text("Online URL → audio buffer · fallback on-device")
                             .foregroundColor(.secondary)
                     }
-                    Text("Khi có mạng, app nhận dạng lần 1 rồi dùng danh mục cửa hàng để tạo shortlist có bằng chứng và thử lại cùng file audio. Nếu online thất bại, app dùng vi-VN on-device khi thiết bị hỗ trợ.")
+                    Text("Hotfix iOS 15: app thử Apple Speech bằng file URL, sau đó tự thử lại cùng file qua audio buffer nếu cần. Nếu online vẫn lỗi và thiết bị hỗ trợ vi-VN on-device, app thử on-device.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }

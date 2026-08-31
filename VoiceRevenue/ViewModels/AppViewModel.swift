@@ -159,7 +159,7 @@ final class ProductVocabularyStore: ObservableObject {
 
 @MainActor
 final class DiagnosticLogger: ObservableObject {
-    static let parserVersion = "0.1.2"
+    static let parserVersion = "0.1.3"
 
     @Published private(set) var currentLogURL: URL?
     private let directory: URL
@@ -262,6 +262,7 @@ final class AppViewModel: ObservableObject {
     @Published var candidates: [CandidateTransaction] = []
     @Published var alertMessage: String?
     @Published var isProcessingRecording = false
+    @Published var speechFailureMessage: String?
 
     let recorder = AudioRecorder()
     let speech = SpeechRecognizerService()
@@ -284,6 +285,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func startRecording() async {
+        speechFailureMessage = nil
+        alertMessage = nil
         await recorder.start()
         switch recorder.state {
         case .recording:
@@ -311,29 +314,60 @@ final class AppViewModel: ObservableObject {
         }
         diagnostics.log(event: "recording.stopped", payload: audioPayload)
 
-        if let text = await speech.transcribe(
+        await recognizeRecording(url: url, preferBufferFirst: false)
+        flow = .transcript
+    }
+
+    func retryTranscription() async {
+        guard !isProcessingRecording else { return }
+        guard let url = recorder.lastRecordingURL else {
+            speechFailureMessage = "Không còn file ghi âm để thử lại."
+            return
+        }
+
+        isProcessingRecording = true
+        defer { isProcessingRecording = false }
+        diagnostics.log(event: "speech.retry.requested", payload: [
+            "file": url.lastPathComponent,
+            "strategy": "audioBufferFirst"
+        ])
+        await recognizeRecording(url: url, preferBufferFirst: true)
+        flow = .transcript
+    }
+
+    private func recognizeRecording(url: URL, preferBufferFirst: Bool) async {
+        let text = await speech.transcribe(
             url: url,
             initialContextualStrings: vocabulary.initialContextualStrings,
-            catalogProducts: vocabulary.allProducts
-        ) {
-            transcript = text
-            diagnostics.log(event: "speech.result", payload: [
-                "recognitionMode": speech.lastRecognitionMode.rawValue,
-                "rawTranscript": text,
-                "normalizedTranscript": VietnameseTextNormalizer.normalize(text),
-                "initialContextualCount": String(vocabulary.initialContextualStrings.count),
-                "catalogCount": String(vocabulary.catalogCount),
-                "onDeviceSupported": String(speech.supportsOnDevice)
-            ])
-        } else {
+            catalogProducts: vocabulary.allProducts,
+            preferBufferFirst: preferBufferFirst
+        )
+
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else {
             transcript = ""
+            candidates = []
+            speechFailureMessage = speech.lastError ?? "Không thể nhận diện giọng nói."
             diagnostics.log(event: "speech.failed", payload: [
                 "recognitionMode": speech.lastRecognitionMode.rawValue,
-                "error": speech.lastError ?? "unknown"
+                "method": speech.lastRecognitionMethod.rawValue,
+                "error": speech.lastError ?? "unknown",
+                "file": url.lastPathComponent
             ])
-            alertMessage = "Không nhận dạng được giọng nói. Bạn có thể nhập transcript thủ công."
+            return
         }
-        flow = .transcript
+
+        transcript = trimmed
+        speechFailureMessage = nil
+        diagnostics.log(event: "speech.result", payload: [
+            "recognitionMode": speech.lastRecognitionMode.rawValue,
+            "method": speech.lastRecognitionMethod.rawValue,
+            "rawTranscript": trimmed,
+            "normalizedTranscript": VietnameseTextNormalizer.normalize(trimmed),
+            "initialContextualCount": String(vocabulary.initialContextualStrings.count),
+            "catalogCount": String(vocabulary.catalogCount),
+            "onDeviceSupported": String(speech.supportsOnDevice)
+        ])
     }
 
     func cancelRecording() {
@@ -343,6 +377,16 @@ final class AppViewModel: ObservableObject {
     }
 
     func parseTranscript() {
+        let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            candidates = []
+            diagnostics.log(event: "parser.skipped.empty_transcript")
+            alertMessage = "Chưa có transcript để phân tích. Hãy thử nhận diện lại hoặc nhập nội dung thủ công."
+            return
+        }
+
+        transcript = cleaned
+        speechFailureMessage = nil
         let segments = TransactionSegmenter.segments(from: transcript)
         diagnostics.log(event: "parser.segmented", payload: [
             "segmentCount": String(segments.count),

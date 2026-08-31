@@ -142,6 +142,11 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(values.first?.needsReview ?? false)
     }
 
+    func testEmptyTranscriptNeverCreatesCandidate() {
+        XCTAssertTrue(TransactionParser.parse("").isEmpty)
+        XCTAssertTrue(TransactionParser.parse("   \n  ").isEmpty)
+    }
+
 
     func testSpeechRecognitionPlannerOnlineThenOnDeviceFallback() {
         XCTAssertEqual(

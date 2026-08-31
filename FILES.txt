@@ -2,6 +2,7 @@
 ./CONTRIBUTING.md
 ./FILES.txt
 ./LICENSE
+./OPEN_SOURCE_LICENSES.md
 ./PRIVACY.md
 ./README.md
 ./VoiceRevenue.xcodeproj/project.pbxproj
@@ -14,6 +15,7 @@
 ./VoiceRevenue/Parsing/VietnameseTimeParser.swift
 ./VoiceRevenue/Resources/Info.plist
 ./VoiceRevenue/Resources/ProductCatalog.json
+./VoiceRevenue/Resources/SherpaVI/ModelManifest.json
 ./VoiceRevenue/Services/Audio/AudioRecorder.swift
 ./VoiceRevenue/Services/Persistence/PersistenceController.swift
 ./VoiceRevenue/Services/Persistence/TransactionRepository.swift
@@ -25,6 +27,7 @@
 ./VoiceRevenue/Views/RecordingView.swift
 ./VoiceRevenue/Views/ReviewView.swift
 ./VoiceRevenue/Views/SettingsView.swift
+./VoiceRevenue/Views/TransactionEditView.swift
 ./VoiceRevenue/Views/TranscriptView.swift
 ./VoiceRevenueTests/ParserTests.swift
 ./google-apps-script/Code.gs

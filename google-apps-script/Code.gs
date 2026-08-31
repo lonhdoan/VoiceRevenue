@@ -1,17 +1,13 @@
 /**
- * VoiceRevenue Google Apps Script endpoint v0.1.1.
+ * VoiceRevenue Google Apps Script endpoint v0.2.0.
  * Deploy as a Web App owned by the user. No project-maintainer credentials are used.
+ * Transactions are UPSERTed by transaction_id so local History edits update the same row.
  */
 const SHEET_NAME = 'Transactions';
 const SERVICE_NAME = 'VoiceRevenue';
-const SERVICE_VERSION = '0.1.1';
+const SERVICE_VERSION = '0.2.0';
 const SPREADSHEET_ID_KEY = 'VOICE_REVENUE_SPREADSHEET_ID';
 
-/**
- * Run this ONCE from the Apps Script editor while the script is bound to the target Sheet.
- * Bound-script "active spreadsheet" methods are available from the editor, but not when
- * the same script later runs as a Web App. We persist the spreadsheet ID for Web App use.
- */
 function setup() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) {
@@ -32,12 +28,7 @@ function doGet() {
   try {
     return json_(health_());
   } catch (err) {
-    return json_({
-      ok: false,
-      service: SERVICE_NAME,
-      version: SERVICE_VERSION,
-      error: String(err && err.message ? err.message : err)
-    });
+    return json_({ ok: false, service: SERVICE_NAME, version: SERVICE_VERSION, error: errorText_(err) });
   }
 }
 
@@ -48,42 +39,51 @@ function doPost(e) {
 
     validate_(body);
     const sheet = getSheet_();
-    if (isDuplicate_(sheet, body.transaction_id)) {
-      return json_({
-        ok: true,
-        duplicate: true,
-        transaction_id: body.transaction_id,
-        service: SERVICE_NAME,
-        version: SERVICE_VERSION
-      });
-    }
+    const values = transactionRow_(body);
+    const existingRow = findTransactionRow_(sheet, body.transaction_id);
+    let action;
 
-    sheet.appendRow([
-      body.transaction_id,
-      body.payment_at || '',
-      body.amount_vnd,
-      body.customer_name || '',
-      body.product || '',
-      body.payment_method || 'unknown',
-      body.notes || '',
-      body.created_at
-    ]);
+    if (existingRow) {
+      sheet.getRange(existingRow, 1, 1, values.length).setValues([values]);
+      action = 'updated';
+    } else {
+      sheet.appendRow(values);
+      action = 'created';
+    }
 
     return json_({
       ok: true,
-      duplicate: false,
+      action: action,
       transaction_id: body.transaction_id,
       service: SERVICE_NAME,
       version: SERVICE_VERSION
     });
   } catch (err) {
-    return json_({
-      ok: false,
-      service: SERVICE_NAME,
-      version: SERVICE_VERSION,
-      error: String(err && err.message ? err.message : err)
-    });
+    return json_({ ok: false, service: SERVICE_NAME, version: SERVICE_VERSION, error: errorText_(err) });
   }
+}
+
+function transactionRow_(body) {
+  return [
+    body.transaction_id,
+    body.payment_at || '',
+    body.amount_vnd,
+    body.customer_name || '',
+    body.product || '',
+    body.payment_method || 'unknown',
+    body.notes || '',
+    body.created_at
+  ];
+}
+
+function findTransactionRow_(sheet, transactionId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const values = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i][0] === transactionId) return i + 2;
+  }
+  return null;
 }
 
 function health_(extra) {
@@ -101,15 +101,9 @@ function health_(extra) {
 }
 
 function validate_(body) {
-  if (!body.transaction_id || typeof body.transaction_id !== 'string') {
-    throw new Error('transaction_id is required');
-  }
-  if (!Number.isInteger(body.amount_vnd) || body.amount_vnd < 0) {
-    throw new Error('amount_vnd must be a non-negative integer');
-  }
-  if (!body.created_at || typeof body.created_at !== 'string') {
-    throw new Error('created_at is required');
-  }
+  if (!body.transaction_id || typeof body.transaction_id !== 'string') throw new Error('transaction_id is required');
+  if (!Number.isInteger(body.amount_vnd) || body.amount_vnd < 0) throw new Error('amount_vnd must be a non-negative integer');
+  if (!body.created_at || typeof body.created_at !== 'string') throw new Error('created_at is required');
 }
 
 function getSpreadsheet_() {
@@ -125,29 +119,15 @@ function getSheet_() {
   let sheet = spreadsheet.getSheetByName(SHEET_NAME);
   if (!sheet) {
     sheet = spreadsheet.insertSheet(SHEET_NAME);
-    sheet.appendRow([
-      'transaction_id',
-      'payment_at',
-      'amount_vnd',
-      'customer_name',
-      'product',
-      'payment_method',
-      'notes',
-      'created_at'
-    ]);
+    sheet.appendRow(['transaction_id', 'payment_at', 'amount_vnd', 'customer_name', 'product', 'payment_method', 'notes', 'created_at']);
   }
   return sheet;
 }
 
-function isDuplicate_(sheet, transactionId) {
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return false;
-  const values = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues().flat();
-  return values.indexOf(transactionId) !== -1;
+function errorText_(err) {
+  return String(err && err.message ? err.message : err);
 }
 
 function json_(object) {
-  return ContentService
-    .createTextOutput(JSON.stringify(object))
-    .setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(ContentService.MimeType.JSON);
 }

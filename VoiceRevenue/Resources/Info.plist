@@ -20,18 +20,21 @@
     <string>6.0</string>
 
     <key>CFBundleShortVersionString</key>
-    <string>0.1.4</string>
+    <string>0.2.0</string>
 
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
 
     <key>LSRequiresIPhoneOS</key>
     <true/>
 
     <key>NSMicrophoneUsageDescription</key>
     <string>Ứng dụng cần microphone để ghi nhận doanh thu bằng giọng nói.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Ứng dụng cần nhận dạng giọng nói tiếng Việt để chuyển lời nói thành giao dịch.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 
     <key>UILaunchScreen</key>
     <dict/>

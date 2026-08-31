@@ -243,7 +243,8 @@ final class AudioRecorder: NSObject, ObservableObject {
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return }
-        for file in files where file != current && ["caf", "m4a"].contains(file.pathExtension.lowercased()) {
+        let currentPath = current.standardizedFileURL.path
+        for file in files where file.standardizedFileURL.path != currentPath && ["caf", "m4a"].contains(file.pathExtension.lowercased()) {
             try? fileManager.removeItem(at: file)
         }
     }

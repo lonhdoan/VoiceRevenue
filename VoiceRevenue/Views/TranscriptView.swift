@@ -82,6 +82,23 @@ struct TranscriptView: View {
                             .stroke(Color.secondary.opacity(0.3))
                     )
 
+                if let alternate = model.speech.alternateTranscript,
+                   !alternate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   alternate != model.transcript {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Có transcript thay thế từ engine tăng độ chính xác")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(alternate)
+                            .font(.footnote)
+                            .lineLimit(3)
+                        Button("Dùng transcript thay thế") {
+                            model.useAlternateTranscript()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
                 Button("Phân tích giao dịch") {
                     model.parseTranscript()
                 }

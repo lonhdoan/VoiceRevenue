@@ -159,7 +159,7 @@ final class ProductVocabularyStore: ObservableObject {
 
 @MainActor
 final class DiagnosticLogger: ObservableObject {
-    static let parserVersion = "0.1.4"
+    static let parserVersion = "0.2.0"
 
     @Published private(set) var currentLogURL: URL?
     private let directory: URL
@@ -328,6 +328,7 @@ final class AppViewModel: ObservableObject {
             "sourceFile": vocabulary.catalogSourceFile,
             "customVocabularyCount": String(vocabulary.customProducts.count)
         ])
+        Task { await speech.refreshModelState() }
     }
 
     func startRecording() async {
@@ -335,25 +336,21 @@ final class AppViewModel: ObservableObject {
         alertMessage = nil
         transcript = ""
         candidates = []
+        speech.resetForNewRecording()
 
-        let liveConsumer = await speech.beginLiveRecognition(
-            contextualStrings: vocabulary.initialContextualStrings
-        )
-        await recorder.start(bufferConsumer: liveConsumer)
-
+        await recorder.start()
         switch recorder.state {
         case .recording:
             diagnostics.log(event: "recording.started", payload: [
-                "liveSpeechStarted": String(liveConsumer != nil),
-                "contextualCount": String(vocabulary.initialContextualStrings.count)
+                "speechEngine": SpeechRecognizerService.engineName,
+                "speechModel": SpeechRecognizerService.modelName,
+                "mode": "offline_record_then_transcribe"
             ])
             flow = .recording
         case .failed(let message):
-            speech.cancelLiveRecognition(reason: "recording_start_failed")
             diagnostics.log(event: "recording.failed", payload: ["error": message])
             alertMessage = message
         default:
-            speech.cancelLiveRecognition(reason: "recording_not_started")
             diagnostics.log(event: "recording.not_started")
         }
     }
@@ -365,7 +362,6 @@ final class AppViewModel: ObservableObject {
 
         recorder.stop()
         guard case .recorded(let url) = recorder.state else {
-            speech.cancelLiveRecognition(reason: "recording_stop_failed")
             speechFailureMessage = "Không lấy được file ghi âm sau khi dừng."
             return
         }
@@ -381,22 +377,14 @@ final class AppViewModel: ObservableObject {
         diagnostics.log(event: "recording.stopped", payload: audioPayload)
         diagnostics.log(event: "recording.audio.format", payload: audioPayload)
 
-        if let liveText = await speech.finishLiveRecognition(),
-           !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            acceptRecognizedText(liveText, url: url, source: "liveAudioBuffer")
-            flow = .transcript
-            return
-        }
-
-        // Live Speech produced no usable words. Replay the exact same saved audio through a fresh
-        // buffer request, then on-device only when the real device reports support.
-        await recognizeRecording(url: url, preferBufferFirst: true)
+        await recognizeRecording(url: url, allowRemoteReinforcement: true)
         flow = .transcript
     }
 
     func retryTranscription() async {
         guard !isProcessingRecording else { return }
-        guard let url = recorder.lastRecordingURL else {
+        guard let url = recorder.lastRecordingURL,
+              FileManager.default.fileExists(atPath: url.path) else {
             speechFailureMessage = "Không còn file ghi âm để thử lại."
             return
         }
@@ -405,17 +393,17 @@ final class AppViewModel: ObservableObject {
         defer { isProcessingRecording = false }
         diagnostics.log(event: "speech.retry.requested", payload: [
             "file": url.lastPathComponent,
-            "fileExists": String(FileManager.default.fileExists(atPath: url.path)),
-            "strategy": "savedAudioBufferReplay"
+            "strategy": "localOpenSourceThenOptionalSelfHosted"
         ])
-        await recognizeRecording(url: url, preferBufferFirst: true)
+        await recognizeRecording(url: url, allowRemoteReinforcement: true)
         flow = .transcript
     }
 
-    /// Diagnostics-only Speech test. It never parses or creates accounting candidates.
+    /// Diagnostics-only local speech test. It never parses or creates accounting candidates.
     func testLastRecordingSpeech() async {
         guard !isProcessingRecording else { return }
-        guard let url = recorder.lastRecordingURL else {
+        guard let url = recorder.lastRecordingURL,
+              FileManager.default.fileExists(atPath: url.path) else {
             alertMessage = "Chưa có file ghi âm gần nhất để test."
             return
         }
@@ -424,36 +412,34 @@ final class AppViewModel: ObservableObject {
         defer { isProcessingRecording = false }
         diagnostics.log(event: "speech.diagnostic_test.requested", payload: [
             "file": url.lastPathComponent,
-            "fileExists": String(FileManager.default.fileExists(atPath: url.path))
+            "engine": SpeechRecognizerService.engineName
         ])
 
-        let text = await speech.transcribe(
-            url: url,
-            initialContextualStrings: vocabulary.initialContextualStrings,
-            catalogProducts: vocabulary.allProducts,
-            preferBufferFirst: true
-        )
+        let text = await speech.transcribeLocalOnly(url: url, catalogProducts: vocabulary.allProducts)
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmed.isEmpty {
-            alertMessage = speech.lastError ?? "Test nhận diện thất bại."
-        } else {
-            alertMessage = "Speech test OK: \(trimmed)"
-        }
+        alertMessage = trimmed.isEmpty
+            ? (speech.lastError ?? "Test nhận diện offline thất bại.")
+            : "Offline STT OK: \(trimmed)"
     }
 
-    private func recognizeRecording(url: URL, preferBufferFirst: Bool) async {
+    func useAlternateTranscript() {
+        guard let replacement = speech.activateAlternate(currentText: transcript) else { return }
+        transcript = replacement
+        speechFailureMessage = nil
+    }
+
+    private func recognizeRecording(url: URL, allowRemoteReinforcement: Bool) async {
         let text = await speech.transcribe(
             url: url,
-            initialContextualStrings: vocabulary.initialContextualStrings,
             catalogProducts: vocabulary.allProducts,
-            preferBufferFirst: preferBufferFirst
+            allowRemoteReinforcement: allowRemoteReinforcement
         )
 
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else {
             transcript = ""
             candidates = []
-            speechFailureMessage = speech.lastError ?? "Không thể nhận diện giọng nói."
+            speechFailureMessage = speech.lastError ?? "Không thể nhận diện giọng nói bằng model offline."
             diagnostics.log(event: "speech.failed", payload: [
                 "recognitionMode": speech.lastRecognitionMode.rawValue,
                 "method": speech.lastRecognitionMethod.rawValue,
@@ -482,18 +468,17 @@ final class AppViewModel: ObservableObject {
             "recognitionMode": speech.lastRecognitionMode.rawValue,
             "method": speech.lastRecognitionMethod.rawValue,
             "source": source,
+            "engine": SpeechRecognizerService.engineName,
+            "model": SpeechRecognizerService.modelName,
             "rawTranscript": trimmed,
             "normalizedTranscript": VietnameseTextNormalizer.normalize(trimmed),
-            "initialContextualCount": String(vocabulary.initialContextualStrings.count),
             "catalogCount": String(vocabulary.catalogCount),
-            "onDeviceSupported": String(speech.supportsOnDevice),
             "file": url.lastPathComponent
         ])
     }
 
     func cancelRecording() {
         recorder.cancel()
-        speech.cancelLiveRecognition(reason: "user_cancelled")
         diagnostics.log(event: "recording.cancelled")
         flow = .home
     }
@@ -601,6 +586,35 @@ final class AppViewModel: ObservableObject {
             _ = await sync.sync(item, context: context)
         }
         repository.reload()
+    }
+
+    func updateTransaction(
+        _ item: TransactionEntity,
+        amountVND: Int64,
+        customerName: String?,
+        product: String?,
+        paymentMethod: PaymentMethod,
+        paymentAt: Date?,
+        notes: String?
+    ) throws {
+        try repository.update(
+            item,
+            amountVND: amountVND,
+            customerName: customerName,
+            product: product,
+            paymentMethod: paymentMethod,
+            paymentAt: paymentAt,
+            notes: notes,
+            markForSync: sync.isConfigured
+        )
+        diagnostics.log(event: "history.transaction.updated", payload: [
+            "transactionID": item.transactionID.uuidString,
+            "amountVND": String(amountVND),
+            "syncStatus": item.syncStatus
+        ])
+        if sync.isConfigured {
+            Task { await syncPendingIfConfigured() }
+        }
     }
 
     private func learnSafeCorrections(from candidate: CandidateTransaction) {

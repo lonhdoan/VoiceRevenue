@@ -33,7 +33,7 @@ struct HomeView: View {
                     Button { showSettings = true } label: { Image(systemName: "gear") }
                 }
             }
-            .sheet(isPresented: $showHistory) { HistoryView(repository: repository) }
+            .sheet(isPresented: $showHistory) { HistoryView(model: model) }
             .sheet(isPresented: $showSettings) { SettingsView(model: model) }
         }
     }

@@ -135,7 +135,7 @@ final class GoogleSheetsSyncService: ObservableObject {
             connectionStatus = .connected
             diagnostics?.log(event: "sync.transaction.success", payload: [
                 "transactionID": item.transactionID.uuidString,
-                "duplicate": String(object["duplicate"] as? Bool ?? false)
+                "action": object["action"] as? String ?? "unknown"
             ])
             return true
         } catch {

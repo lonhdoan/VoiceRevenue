@@ -1,43 +1,29 @@
-# Build status — VoiceRevenue v0.1.4 emergency live speech patch
+# VoiceRevenue v0.2.0 Build Status
 
-Generated and statically validated in a Linux environment without Xcode/iPhoneOS SDK.
+## Release target
 
-## Runtime evidence used
+- Marketing version: 0.2.0
+- Build: 6
+- Deployment target: iOS 15.0
+- Swift language mode: 5.0
+- Core Data schema migration: none
 
-The attached v0.1.3 / build 4 diagnostic from iOS 15.7.9 contains only:
+## Open-source STT
 
-- `app.session.started`
-- `catalog.loaded` (`1267` products)
-- `diagnostics.export.requested`
+- Engine: sherpa-onnx 1.13.6 (Swift Package pinned exactly)
+- Runtime dependency: ONNX Runtime through sherpa-onnx
+- Model: sherpa-onnx-zipformer-vi-int8-2025-04-20
+- Model archive SHA-256: `48d0fdc9b3515eb9b00c4dfec2883207ee5ebe5c95b1959e7afce87fc3391938`
+- Runtime mode: local CPU, 1 thread, 16 kHz mono float input
+- Apple Speech required for core STT: no
 
-It does **not** contain recording or Speech method events. Source inspection found why this can happen after relaunch: v0.1.3 creates one log file per launch and `exportURL()` exports only the current session file, so prior-session Speech failures are omitted from the export.
+## Validation performed in patch-generation environment
 
-## v0.1.4 changes
+- Swift syntax parse for all project Swift files: pending final packaging validation
+- Pure Swift parser harness: PASS for contextual `giá`/money-cue cases and `1tr2`
+- Info.plist lint: PASS
+- project.pbxproj plist lint: PASS
+- Apps Script JavaScript syntax: PASS
+- Product catalog remains >= 1,000 entries / expected 1,267 resource
 
-- Primary path is now live `SFSpeechAudioBufferRecognitionRequest` while the microphone is recording.
-- `AVAudioEngine` provides one microphone tap for both live Speech and local CAF persistence, avoiding two competing capture stacks.
-- Partial text is visible while recording and a non-empty partial is preserved if Apple never sends a final result.
-- If live Speech returns no usable text, the same saved CAF is replayed through a new server-capable audio-buffer request.
-- On-device replay runs only when `supportsOnDeviceRecognition == true`.
-- Empty transcript can never reach `TransactionParser`.
-- Diagnostic export aggregates up to five persisted sessions instead of exporting only the newest launch.
-- Settings shows the most recent Live / Replay / On-device / Final Speech status and NSError domain/code/description.
-- Retry and Diagnostics test reuse the same saved audio and never create a transaction by themselves.
-
-## whisper.cpp decision
-
-Not bundled in this emergency patch. The current official whisper.cpp XCFramework build script declares iOS 16.4 as its minimum, so its released XCFramework cannot be safely dropped into this iOS 15 app. Upstream source CI demonstrates lower deployment-target builds are possible, but VoiceRevenue would need a custom Xcode-built framework/model pipeline and real iOS 15 validation. Shipping that unverified C++ binary path in the same emergency patch would increase the chance of replacing a Speech runtime bug with a build/install failure.
-
-## Verified here
-
-- `swiftc -frontend -parse` succeeds for every Swift source and test file.
-- Pure Foundation parser/model/catalog sources compile and the emergency parser harness passes: `HOTFIX_PARSER_GUARDS_OK`.
-- `ProductCatalog.json` still contains 1,267 products.
-- `Info.plist` passes `plutil -lint` and reports 0.1.4 / build 5.
-- `project.pbxproj` passes `plutil -lint` and preserves `IPHONEOS_DEPLOYMENT_TARGET = 15.0`.
-- No Core Data schema change.
-- No paid API, account, backend, or new package dependency.
-
-## Authoritative next verification
-
-Push the patched source and run the existing macOS/Xcode 16.4 unsigned-IPA workflow. That workflow is the authoritative full iPhoneOS compile/package check. Then test one 5–10 second recording on the real iOS 15.7.9 device and confirm partial text appears while speaking.
+This environment does not contain macOS/Xcode, so it does not claim an iPhoneOS compile. The existing GitHub Actions Xcode workflow is authoritative for the full device build and tests.

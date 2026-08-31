@@ -1,16 +1,23 @@
-# Privacy
+# VoiceRevenue Privacy — v0.2.0
 
-VoiceRevenue is local-first. Confirmed transactions are stored on the iPhone with Core Data. The project contains no ads, analytics SDK, telemetry, crash-reporting SaaS, maintainer server, or maintainer API key.
+VoiceRevenue is local-first and does not include ads, analytics, tracking, telemetry, or a maintainer-controlled backend.
 
-Audio is recorded locally. VoiceRevenue v0.1.4 uses Apple's Speech framework in an accuracy-first live mode. Microphone PCM buffers are sent to Apple Speech while also being saved locally; if live recognition produces no usable transcript, the same saved recording is replayed through a fresh Apple Speech buffer request. If that also fails and the device supports `vi-VN` on-device recognition, the same recording is retried on-device. VoiceRevenue has no separate paid speech API account. Apple Speech behavior is subject to Apple's platform and privacy policies.
+## Speech recognition
 
-Product vocabulary and learned speech/product corrections are stored locally in UserDefaults.
+The default speech-to-text path uses the open-source `sherpa-onnx` engine and a bundled Vietnamese model. Audio and transcript processing happen on the iPhone and do not require Apple Speech or a cloud speech API.
 
-Diagnostic logs are stored locally under the app's Application Support directory. They can contain transcripts, product/customer text, transaction amounts, parser decisions, and sync errors. Logs are never uploaded automatically. The user explicitly chooses whether and where to export them through the iOS share sheet.
+The optional **Tăng độ chính xác bằng máy chủ riêng** feature is OFF by default. When the user explicitly enables it, VoiceRevenue sends the current recording to the endpoint URL configured by that user. The project does not operate or receive data from that endpoint.
 
-Google Sheets sync is optional. If enabled, confirmed transaction data is sent only to the Google Apps Script Web App URL configured by the user. The project maintainer receives no copy of this data.
+## Local data
 
-Users should review Apple's and Google's own privacy terms for services they choose to use.
+Confirmed transactions are stored in Core Data on the device. Product vocabulary, corrections, and self-hosted endpoint settings are stored locally. Diagnostic logs and the latest recording remain local unless the user explicitly shares/exports them.
 
+Diagnostic exports may contain transcripts, customer names, products, amounts, recognition errors, and parser/sync metadata. Review them before sharing.
 
-The bundled v0.1.4 product catalog is derived from the store inventory workbook and remains inside the application. The full catalog is used locally for matching; only a bounded contextual shortlist may be supplied to Apple Speech as recognition hints.
+## Google Sheets
+
+Google Sheets sync is optional. When configured, confirmed transaction fields are sent only to the user-supplied Google Apps Script Web App URL. Edited transactions are re-sent using the same `transaction_id` so the script can update the existing row.
+
+## No credentials bundled
+
+VoiceRevenue ships no paid API key, Google service-account credential, OpenAI key, or maintainer token.

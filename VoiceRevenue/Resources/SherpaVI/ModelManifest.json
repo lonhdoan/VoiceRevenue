@@ -1,0 +1,31 @@
+{
+  "engine": "sherpa-onnx",
+  "engineVersion": "1.13.6",
+  "model": "sherpa-onnx-zipformer-vi-int8-2025-04-20",
+  "language": "vi",
+  "archiveURL": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-vi-int8-2025-04-20.tar.bz2",
+  "archiveSHA256": "48d0fdc9b3515eb9b00c4dfec2883207ee5ebe5c95b1959e7afce87fc3391938",
+  "archiveSizeBytes": 60181038,
+  "files": [
+    {
+      "name": "encoder-epoch-12-avg-8.int8.onnx",
+      "sha256": "b3abdef7a660fea7faf5e076b3c7613b0fc98406707103784d018189bb522124"
+    },
+    {
+      "name": "decoder-epoch-12-avg-8.onnx",
+      "sha256": "d1d27cca84c824a8acf5ce6edf0f2c0880cfe295d2e69b95134de1707e1d9998"
+    },
+    {
+      "name": "joiner-epoch-12-avg-8.int8.onnx",
+      "sha256": null
+    },
+    {
+      "name": "tokens.txt",
+      "sha256": null
+    },
+    {
+      "name": "bpe.model",
+      "sha256": "289dbb44527c13c419ae3a4d8ce6a349f01a97f8777e69934a77e3692d2f10db"
+    }
+  ]
+}

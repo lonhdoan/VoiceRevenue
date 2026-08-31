@@ -52,6 +52,7 @@ enum VietnameseMoneyParser {
     private static func parseMillionPhrase(_ text: String) -> MoneyParseResult? {
         // 1 trieu 2 => 1,200,000 ; 1 trieu 200 => 1,200,000 ; 1 trieu ruoi => 1,500,000
         let patterns = [
+            #"(?<!\d)(\d+)\s*tr\s*(\d{1,3})(?!\d)"#,
             #"(?<!\d)(\d+)\s*(?:trieu|cu)\s*(ruoi)"#,
             #"(?<!\d)(\d+)\s*(?:trieu|cu)\s*(\d{1,3})(?!\d)"#,
             #"(?<!\d)(\d+)\s*(?:trieu|cu)(?!\p{L})"#

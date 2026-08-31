@@ -22,24 +22,16 @@ struct RecordingView: View {
             Text(recorder.elapsed.formatted(.number.precision(.fractionLength(1))) + " s")
                 .font(.title.monospacedDigit())
 
-            Text(model.isProcessingRecording ? "Đang xử lý…" : "Đang nghe…")
+            Text(model.isProcessingRecording ? "Đang nhận dạng offline…" : "Đang ghi offline…")
                 .font(.headline)
 
-            Group {
-                let live = speech.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                if live.isEmpty {
-                    Text("Nói một câu ngắn bằng tiếng Việt. Chữ nhận được sẽ xuất hiện tại đây ngay khi Apple Speech trả kết quả.")
-                        .foregroundColor(.secondary)
-                } else {
-                    Text(live)
-                        .font(.title3)
-                        .fontWeight(.medium)
-                        .textSelection(.enabled)
-                }
-            }
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity, minHeight: 80)
-            .padding(.horizontal)
+            Text(model.isProcessingRecording
+                 ? "Model mã nguồn mở đang xử lý file ghi âm trên máy."
+                 : "Nói một câu ngắn bằng tiếng Việt, rồi bấm Dừng để nhận dạng hoàn toàn offline.")
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: 80)
+                .padding(.horizontal)
 
             Spacer()
 

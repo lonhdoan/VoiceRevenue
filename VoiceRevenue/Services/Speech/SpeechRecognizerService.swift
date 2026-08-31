@@ -1,17 +1,17 @@
 import AVFoundation
+import Combine
+import CryptoKit
 import Foundation
-import Network
-import Speech
+import SherpaOnnx
 
 enum SpeechRecognitionMode: String, Equatable {
-    case online
-    case onDeviceFallback
+    case localOffline
+    case selfHostedReinforcement
 }
 
 enum SpeechRecognitionMethod: String, Equatable {
-    case liveAudioBuffer
-    case replayAudioBuffer
-    case onDeviceAudioBuffer
+    case sherpaOnnxLocal
+    case selfHostedRemote
 }
 
 enum SpeechStageStatus: String, Equatable {
@@ -34,138 +34,163 @@ enum SpeechStageStatus: String, Equatable {
     }
 }
 
-enum SpeechRecognitionPlanner {
-    static func orderedModes(
-        networkAvailable: Bool,
-        recognizerAvailable: Bool,
-        supportsOnDevice: Bool
-    ) -> [SpeechRecognitionMode] {
-        if networkAvailable && recognizerAvailable {
-            return supportsOnDevice ? [.online, .onDeviceFallback] : [.online]
+enum LocalSpeechModelState: Equatable {
+    case unknown
+    case verifying
+    case ready
+    case missing(String)
+    case invalid(String)
+
+    var displayName: String {
+        switch self {
+        case .unknown: return "Chưa kiểm tra"
+        case .verifying: return "Đang kiểm tra…"
+        case .ready: return "Sẵn sàng"
+        case .missing: return "Thiếu model"
+        case .invalid: return "Model lỗi"
         }
-        if supportsOnDevice {
-            return [.onDeviceFallback]
-        }
-        if recognizerAvailable {
-            return [.online]
-        }
-        return []
     }
 }
 
-
-struct LiveTranscriptSelection: Equatable {
-    let text: String
-    let source: String
+struct TranscriptArbitrationResult: Equatable {
+    let selected: String
+    let alternate: String?
+    let source: SpeechRecognitionMethod
+    let localScore: Double
+    let remoteScore: Double?
 }
 
-enum LiveTranscriptSelector {
-    static func select(final: String?, partial: String?) -> LiveTranscriptSelection? {
-        let finalText = final?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !finalText.isEmpty {
-            return LiveTranscriptSelection(text: finalText, source: "final")
+enum SpeechTranscriptArbitrator {
+    static func score(_ text: String, catalogProducts: [String]) -> Double {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        let normalized = VietnameseTextNormalizer.normalize(trimmed)
+        var score = 1.0
+        if VietnameseMoneyParser.firstAmount(in: trimmed) != nil { score += 2.0 }
+
+        var exactHits = 0
+        for product in catalogProducts {
+            let candidate = VietnameseTextNormalizer.normalize(product)
+            guard !candidate.isEmpty else { continue }
+            if normalized.range(of: candidate) != nil {
+                exactHits += 1
+                if exactHits == 4 { break }
+            }
         }
-        let partialText = partial?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !partialText.isEmpty {
-            return LiveTranscriptSelection(text: partialText, source: "partial")
+        score += Double(exactHits) * 0.5
+        return score
+    }
+
+    static func choose(local: String, remote: String?, catalogProducts: [String]) -> TranscriptArbitrationResult {
+        let localTrimmed = local.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteTrimmed = remote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let localScore = score(localTrimmed, catalogProducts: catalogProducts)
+        let remoteScore = remoteTrimmed.isEmpty ? nil : score(remoteTrimmed, catalogProducts: catalogProducts)
+
+        if !remoteTrimmed.isEmpty,
+           let remoteScore,
+           (localTrimmed.isEmpty || remoteScore >= localScore + 1.0) {
+            return TranscriptArbitrationResult(
+                selected: remoteTrimmed,
+                alternate: localTrimmed.isEmpty ? nil : localTrimmed,
+                source: .selfHostedRemote,
+                localScore: localScore,
+                remoteScore: remoteScore
+            )
         }
-        return nil
+        return TranscriptArbitrationResult(
+            selected: localTrimmed,
+            alternate: remoteTrimmed.isEmpty || remoteTrimmed == localTrimmed ? nil : remoteTrimmed,
+            source: .sherpaOnnxLocal,
+            localScore: localScore,
+            remoteScore: remoteScore
+        )
     }
 }
 
-struct SpeechPassResult: Equatable {
-    let text: String
-    let averageConfidence: Double
-    let segmentConfidences: [Float]
-
-    var segmentCount: Int { segmentConfidences.count }
-
-    var confidenceDescription: String {
-        String(format: "%.3f", averageConfidence)
-    }
-
-    var segmentConfidenceDescription: String {
-        segmentConfidences.map { String(format: "%.3f", $0) }.joined(separator: ",")
-    }
-}
-
-private enum SpeechHotfixError: LocalizedError {
+private enum OpenSpeechError: LocalizedError {
+    case modelMissing(String)
+    case modelInvalid(String)
+    case audioUnreadable
+    case audioTooLong
     case emptyTranscript
-    case invalidAudioFile
-    case unableToCreatePCMBuffer
-    case timedOut
+    case invalidRemoteEndpoint
+    case remoteHTTP(Int)
+    case remoteResponse
 
     var errorDescription: String? {
         switch self {
-        case .emptyTranscript:
-            return "Apple Speech trả về transcript rỗng."
-        case .invalidAudioFile:
-            return "Không thể đọc file ghi âm để nhận diện giọng nói."
-        case .unableToCreatePCMBuffer:
-            return "Không thể tạo audio buffer để thử nhận diện lại."
-        case .timedOut:
-            return "Nhận diện giọng nói quá thời gian chờ."
+        case .modelMissing(let file): return "Thiếu model offline: \(file). Hãy chạy lại apply-v0.2.0.ps1."
+        case .modelInvalid(let file): return "Model offline không đúng checksum: \(file)."
+        case .audioUnreadable: return "Không thể đọc file ghi âm để nhận dạng offline."
+        case .audioTooLong: return "Bản ghi quá dài cho chế độ offline trên thiết bị cũ."
+        case .emptyTranscript: return "Model offline không nhận ra nội dung có nghĩa."
+        case .invalidRemoteEndpoint: return "Địa chỉ máy chủ riêng không hợp lệ."
+        case .remoteHTTP(let code): return "Máy chủ riêng trả HTTP \(code)."
+        case .remoteResponse: return "Máy chủ riêng không trả transcript hợp lệ."
         }
     }
 }
 
-private final class SpeechContinuationGate {
-    private let lock = NSLock()
-    private var finished = false
-
-    func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !finished else { return false }
-        finished = true
-        return true
-    }
+private struct LocalRecognitionOutput {
+    let text: String
+    let inferenceSeconds: Double
+    let audioSeconds: Double
 }
 
-private final class SpeechResultBox {
-    private let lock = NSLock()
-    private var bestResult: SpeechPassResult?
-    private var finalResult: SpeechPassResult?
-    private var storedError: NSError?
-    private var completed = false
+private final class SherpaLocalEngine {
+    private var recognizer: SherpaOnnxOfflineRecognizer?
+    private var modelPaths: [String: URL] = [:]
+
+    func recognize(samples: [Float], sampleRate: Int, files: [String: URL]) throws -> LocalRecognitionOutput {
+        let recognizer = try recognizerForFiles(files)
+        let start = ProcessInfo.processInfo.systemUptime
+        let result = recognizer.decode(samples: samples, sampleRate: sampleRate)
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        return LocalRecognitionOutput(
+            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            inferenceSeconds: elapsed,
+            audioSeconds: Double(samples.count) / Double(sampleRate)
+        )
+    }
 
     func reset() {
-        lock.lock()
-        bestResult = nil
-        finalResult = nil
-        storedError = nil
-        completed = false
-        lock.unlock()
+        recognizer = nil
+        modelPaths = [:]
     }
 
-    func update(_ result: SpeechPassResult, isFinal: Bool) {
-        lock.lock()
-        let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            bestResult = result
-            if isFinal { finalResult = result }
+    private func recognizerForFiles(_ files: [String: URL]) throws -> SherpaOnnxOfflineRecognizer {
+        if let recognizer, modelPaths == files { return recognizer }
+
+        guard let encoder = files["encoder-epoch-12-avg-8.int8.onnx"],
+              let decoder = files["decoder-epoch-12-avg-8.onnx"],
+              let joiner = files["joiner-epoch-12-avg-8.int8.onnx"],
+              let tokens = files["tokens.txt"] else {
+            throw OpenSpeechError.modelMissing(SpeechRecognizerService.modelName)
         }
-        lock.unlock()
-    }
 
-    func setErrorIfActive(_ error: Error) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !completed else { return false }
-        storedError = error as NSError
-        return true
-    }
-
-    func markCompleted() {
-        lock.lock()
-        completed = true
-        lock.unlock()
-    }
-
-    func snapshot() -> (best: SpeechPassResult?, final: SpeechPassResult?, error: NSError?, completed: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        return (bestResult, finalResult, storedError, completed)
+        let transducer = sherpaOnnxOfflineTransducerModelConfig(
+            encoder: encoder.path,
+            decoder: decoder.path,
+            joiner: joiner.path
+        )
+        let model = sherpaOnnxOfflineModelConfig(
+            tokens: tokens.path,
+            transducer: transducer,
+            numThreads: 1,
+            provider: "cpu",
+            debug: 0
+        )
+        let feat = sherpaOnnxFeatureConfig(sampleRate: 16_000, featureDim: 80)
+        var config = sherpaOnnxOfflineRecognizerConfig(
+            featConfig: feat,
+            modelConfig: model,
+            decodingMethod: "greedy_search"
+        )
+        let created = SherpaOnnxOfflineRecognizer(config: &config)
+        recognizer = created
+        modelPaths = files
+        return created
     }
 }
 
@@ -178,649 +203,449 @@ final class SpeechRecognizerService: ObservableObject {
         case failed(String)
     }
 
-    private enum StatusKeys {
-        static let live = "speechStatus.live.v0.1.4"
-        static let replay = "speechStatus.replay.v0.1.4"
-        static let onDevice = "speechStatus.onDevice.v0.1.4"
-        static let local = "speechStatus.local.v0.1.4"
-        static let final = "speechStatus.final.v0.1.4"
-        static let errorDomain = "speechStatus.errorDomain.v0.1.4"
-        static let errorCode = "speechStatus.errorCode.v0.1.4"
-        static let errorDescription = "speechStatus.errorDescription.v0.1.4"
+    static let engineName = "sherpa-onnx"
+    static let engineVersion = "1.13.6"
+    static let modelName = "sherpa-onnx-zipformer-vi-int8-2025-04-20"
+    static let modelArchiveSHA256 = "48d0fdc9b3515eb9b00c4dfec2883207ee5ebe5c95b1959e7afce87fc3391938"
+
+    private enum Keys {
+        static let remoteEnabled = "openSpeech.remote.enabled.v0.2.0"
+        static let remoteURL = "openSpeech.remote.url.v0.2.0"
+        static let remoteModel = "openSpeech.remote.model.v0.2.0"
     }
 
+    private static let requiredFiles: [(name: String, sha256: String?)] = [
+        ("encoder-epoch-12-avg-8.int8.onnx", "b3abdef7a660fea7faf5e076b3c7613b0fc98406707103784d018189bb522124"),
+        ("decoder-epoch-12-avg-8.onnx", "d1d27cca84c824a8acf5ce6edf0f2c0880cfe295d2e69b95134de1707e1d9998"),
+        ("joiner-epoch-12-avg-8.int8.onnx", nil),
+        ("tokens.txt", nil),
+        ("bpe.model", "289dbb44527c13c419ae3a4d8ce6a349f01a97f8777e69934a77e3692d2f10db")
+    ]
+
     @Published private(set) var state: State = .idle
-    @Published private(set) var liveTranscript: String = ""
-    @Published private(set) var lastRecognitionMode: SpeechRecognitionMode = .online
-    @Published private(set) var lastRecognitionMethod: SpeechRecognitionMethod = .liveAudioBuffer
+    @Published private(set) var modelState: LocalSpeechModelState = .unknown
+    @Published private(set) var localStatus: SpeechStageStatus = .notRun
+    @Published private(set) var remoteStatus: SpeechStageStatus = .notRun
+    @Published private(set) var finalStatus: SpeechStageStatus = .notRun
+    @Published private(set) var lastRecognitionMode: SpeechRecognitionMode = .localOffline
+    @Published private(set) var lastRecognitionMethod: SpeechRecognitionMethod = .sherpaOnnxLocal
     @Published private(set) var lastError: String?
-    @Published private(set) var liveStatus: SpeechStageStatus
-    @Published private(set) var replayStatus: SpeechStageStatus
-    @Published private(set) var onDeviceStatus: SpeechStageStatus
-    @Published private(set) var localFallbackStatus: SpeechStageStatus
-    @Published private(set) var finalStatus: SpeechStageStatus
-    @Published private(set) var lastErrorDomain: String
-    @Published private(set) var lastErrorCode: String
-    @Published private(set) var lastErrorDescription: String
+    @Published private(set) var lastErrorDomain = ""
+    @Published private(set) var lastErrorCode = ""
+    @Published private(set) var lastErrorDescription = ""
+    @Published private(set) var localTranscript = ""
+    @Published private(set) var remoteTranscript = ""
+    @Published private(set) var alternateTranscript: String?
+    @Published private(set) var lastInferenceSeconds: Double?
+    @Published private(set) var lastRealtimeFactor: Double?
+
+    @Published var remoteReinforcementEnabled: Bool {
+        didSet { UserDefaults.standard.set(remoteReinforcementEnabled, forKey: Keys.remoteEnabled) }
+    }
+    @Published var remoteEndpointURLString: String {
+        didSet { UserDefaults.standard.set(remoteEndpointURLString, forKey: Keys.remoteURL) }
+    }
+    @Published var remoteModelName: String {
+        didSet { UserDefaults.standard.set(remoteModelName, forKey: Keys.remoteModel) }
+    }
 
     weak var diagnostics: DiagnosticLogger?
 
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "vi-VN"))
-    private let networkMonitor = NWPathMonitor()
-    private let networkQueue = DispatchQueue(label: "VoiceRevenue.NetworkMonitor")
-    private var networkAvailable = true
-
-    private var liveRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var liveTask: SFSpeechRecognitionTask?
-    private let liveResultBox = SpeechResultBox()
-    private var replayTask: SFSpeechRecognitionTask?
+    private let inferenceQueue = DispatchQueue(label: "VoiceRevenue.SherpaOnnxInference", qos: .userInitiated)
+    private let localEngine = SherpaLocalEngine()
 
     init() {
         let defaults = UserDefaults.standard
-        liveStatus = SpeechStageStatus(rawValue: defaults.string(forKey: StatusKeys.live) ?? "") ?? .notRun
-        replayStatus = SpeechStageStatus(rawValue: defaults.string(forKey: StatusKeys.replay) ?? "") ?? .notRun
-        onDeviceStatus = SpeechStageStatus(rawValue: defaults.string(forKey: StatusKeys.onDevice) ?? "") ?? .notRun
-        localFallbackStatus = .notInstalled
-        finalStatus = SpeechStageStatus(rawValue: defaults.string(forKey: StatusKeys.final) ?? "") ?? .notRun
-        lastErrorDomain = defaults.string(forKey: StatusKeys.errorDomain) ?? ""
-        lastErrorCode = defaults.string(forKey: StatusKeys.errorCode) ?? ""
-        lastErrorDescription = defaults.string(forKey: StatusKeys.errorDescription) ?? ""
-
-        networkMonitor.pathUpdateHandler = { [weak self] path in
-            Task { @MainActor in
-                self?.networkAvailable = path.status == .satisfied
-            }
-        }
-        networkMonitor.start(queue: networkQueue)
+        remoteReinforcementEnabled = defaults.bool(forKey: Keys.remoteEnabled)
+        remoteEndpointURLString = defaults.string(forKey: Keys.remoteURL) ?? ""
+        remoteModelName = defaults.string(forKey: Keys.remoteModel) ?? "whisper-1"
     }
 
-    deinit {
-        networkMonitor.cancel()
+    var isAvailable: Bool {
+        if case .ready = modelState { return true }
+        return bundledModelDirectory() != nil
     }
 
-    var isAvailable: Bool { recognizer?.isAvailable ?? false }
+    var supportsOnDevice: Bool { isAvailable }
+    var liveStatus: SpeechStageStatus { localStatus }
+    var replayStatus: SpeechStageStatus { remoteStatus }
+    var onDeviceStatus: SpeechStageStatus { .unsupported }
+    var localFallbackStatus: SpeechStageStatus { localStatus }
 
-    var supportsOnDevice: Bool {
-        recognizer?.supportsOnDeviceRecognition ?? false
-    }
-
-    func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status)
-            }
-        }
-    }
-
-    /// Starts the primary live Speech path. The returned closure is deliberately independent of
-    /// MainActor state so AudioRecorder can append microphone PCM buffers directly from its audio tap.
-    func beginLiveRecognition(
-        contextualStrings: [String] = []
-    ) async -> ((AVAudioPCMBuffer) -> Void)? {
-        resetStatusesForNewPipeline()
-        state = .recognizing
-        lastError = nil
-        liveTranscript = ""
-        liveResultBox.reset()
-
-        let auth = await requestAuthorization()
-        guard auth == .authorized else {
-            let error = NSError(
-                domain: "VoiceRevenue.SpeechAuthorization",
-                code: Int(auth.rawValue),
-                userInfo: [NSLocalizedDescriptionKey: "Speech Recognition chưa được cấp quyền."]
-            )
-            recordFailure(error, stage: "speech.live", method: .liveAudioBuffer, requireOnDevice: false)
-            return nil
-        }
-        guard let recognizer else {
-            let error = NSError(
-                domain: "VoiceRevenue.SpeechRecognizer",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Không tạo được bộ nhận dạng tiếng Việt vi-VN."]
-            )
-            recordFailure(error, stage: "speech.live", method: .liveAudioBuffer, requireOnDevice: false)
-            return nil
-        }
-        guard recognizer.isAvailable else {
-            let error = NSError(
-                domain: "VoiceRevenue.SpeechRecognizer",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Apple Speech online hiện không khả dụng."]
-            )
-            recordFailure(error, stage: "speech.live", method: .liveAudioBuffer, requireOnDevice: false)
-            return nil
-        }
-
-        cancelLiveRecognition(reason: "replace_previous_live_session", logCancellation: false)
-
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        configure(
-            request,
-            requireOnDevice: false,
-            contextualStrings: contextualStrings,
-            partialResults: true
-        )
-
-        liveRequest = request
-        lastRecognitionMode = .online
-        lastRecognitionMethod = .liveAudioBuffer
-        setStageStatus(.running, for: .liveAudioBuffer)
-
-        diagnostics?.log(event: "speech.pipeline.started", payload: [
-            "networkAvailable": String(networkAvailable),
-            "locale": recognizer.locale.identifier,
-            "recognizerAvailable": String(recognizer.isAvailable),
-            "onDeviceSupported": String(supportsOnDevice),
-            "contextualCount": String(request.contextualStrings.count)
-        ])
-        diagnostics?.log(event: "speech.live.started", payload: [
-            "method": SpeechRecognitionMethod.liveAudioBuffer.rawValue,
-            "requiresOnDevice": "false",
-            "locale": recognizer.locale.identifier,
-            "contextualCount": String(request.contextualStrings.count)
-        ])
-
-        let resultBox = liveResultBox
-        liveTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            if let result {
-                let pass = Self.passResult(from: result)
-                resultBox.update(pass, isFinal: result.isFinal)
-                let trimmed = pass.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.liveTranscript = trimmed
-                        self.diagnostics?.log(
-                            event: result.isFinal ? "speech.live.final" : "speech.live.partial",
-                            payload: [
-                                "transcript": trimmed,
-                                "confidence": pass.confidenceDescription,
-                                "segmentConfidences": pass.segmentConfidenceDescription
-                            ]
-                        )
-                    }
-                }
-            }
-
-            if let error, resultBox.setErrorIfActive(error) {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let snapshot = resultBox.snapshot()
-                    if snapshot.final == nil && !snapshot.completed {
-                        self.recordFailure(
-                            error,
-                            stage: "speech.live",
-                            method: .liveAudioBuffer,
-                            requireOnDevice: false
-                        )
-                    }
-                }
-            }
-        }
-
-        // Capturing request, rather than self, keeps the real-time audio callback independent of
-        // actor hopping and prevents loss/reordering of microphone buffers.
-        return { buffer in
-            request.append(buffer)
-        }
-    }
-
-    /// Ends live audio and waits briefly for Apple's final callback. If Apple never marks a result
-    /// final, a useful non-empty partial transcript is preserved instead of being discarded.
-    func finishLiveRecognition(timeoutSeconds: Double = 2.0) async -> String? {
-        guard let request = liveRequest else { return nil }
-        request.endAudio()
-
-        let timeout = max(0.5, min(timeoutSeconds, 4.0))
-        let deadline = Date().addingTimeInterval(timeout)
-
-        while Date() < deadline {
-            let snapshot = liveResultBox.snapshot()
-            if snapshot.final != nil || (snapshot.error != nil && snapshot.best == nil) {
-                break
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-
-        let snapshot = liveResultBox.snapshot()
-        let selection = LiveTranscriptSelector.select(
-            final: snapshot.final?.text,
-            partial: snapshot.best?.text
-        )
-        let trimmed = selection?.text ?? ""
-        let source = selection?.source ?? "none"
-        let selected = snapshot.final ?? snapshot.best
-
-        liveResultBox.markCompleted()
-        liveTask?.cancel()
-        liveTask = nil
-        liveRequest = nil
-
-        guard !trimmed.isEmpty else {
-            if snapshot.error == nil {
-                let error = SpeechHotfixError.emptyTranscript
-                recordFailure(
-                    error,
-                    stage: "speech.live",
-                    method: .liveAudioBuffer,
-                    requireOnDevice: false
-                )
-            }
-            return nil
-        }
-
-        liveTranscript = trimmed
-        state = .recognized(trimmed)
-        lastError = nil
-        setStageStatus(.success, for: .liveAudioBuffer)
-        setFinalStatus(.success)
-        diagnostics?.log(event: "speech.live.succeeded", payload: [
-            "source": source,
-            "transcript": trimmed,
-            "confidence": selected?.confidenceDescription ?? "0.000",
-            "segmentConfidences": selected?.segmentConfidenceDescription ?? ""
-        ])
-        diagnostics?.log(event: "speech.pipeline.succeeded", payload: [
-            "source": "liveAudioBuffer",
-            "transcript": trimmed
-        ])
-        return trimmed
-    }
-
-    func cancelLiveRecognition(reason: String, logCancellation: Bool = true) {
-        liveRequest?.endAudio()
-        liveResultBox.markCompleted()
-        liveTask?.cancel()
-        liveTask = nil
-        liveRequest = nil
-        if logCancellation {
-            diagnostics?.log(event: "speech.live.cancelled", payload: ["reason": reason])
-        }
-    }
-
-    /// Replays an already saved recording through a fresh Apple Speech buffer request. This is the
-    /// recovery path after live Speech returned no usable text, and it is also used by manual Retry.
-    func transcribe(
-        url: URL,
-        initialContextualStrings: [String] = [],
-        catalogProducts: [String] = [],
-        preferBufferFirst: Bool = true
-    ) async -> String? {
-        let auth = await requestAuthorization()
-        guard auth == .authorized else {
-            return pipelineFailure("Speech Recognition chưa được cấp quyền.")
-        }
-        guard let recognizer else {
-            return pipelineFailure("Không tạo được bộ nhận dạng tiếng Việt vi-VN.")
-        }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return pipelineFailure("File ghi âm không còn tồn tại để nhận diện.")
-        }
-
-        state = .recognizing
-        lastError = nil
-        let context = cappedContext(initialContextualStrings)
-        diagnostics?.log(event: "speech.recovery.started", payload: [
-            "file": url.lastPathComponent,
-            "networkAvailable": String(networkAvailable),
-            "recognizerAvailable": String(recognizer.isAvailable),
-            "onDeviceSupported": String(supportsOnDevice),
-            "contextualCount": String(context.count),
-            "catalogCount": String(catalogProducts.count),
-            "preferBufferFirst": String(preferBufferFirst)
-        ])
-
-        var latestError: Error?
-
-        if recognizer.isAvailable {
-            lastRecognitionMode = .online
-            lastRecognitionMethod = .replayAudioBuffer
-            setStageStatus(.running, for: .replayAudioBuffer)
-            diagnostics?.log(event: "speech.replay.started", payload: stagePayload(
-                method: .replayAudioBuffer,
-                requireOnDevice: false,
-                recognizer: recognizer,
-                contextualCount: context.count,
-                file: url
-            ))
-
-            do {
-                let result = try await recognizeAudioBuffer(
-                    url: url,
-                    recognizer: recognizer,
-                    requireOnDevice: false,
-                    contextualStrings: context
-                )
-                if let accepted = accept(result, method: .replayAudioBuffer, mode: .online) {
-                    setStageStatus(.success, for: .replayAudioBuffer)
-                    setFinalStatus(.success)
-                    diagnostics?.log(event: "speech.replay.succeeded", payload: [
-                        "transcript": accepted,
-                        "confidence": result.confidenceDescription,
-                        "segmentConfidences": result.segmentConfidenceDescription
-                    ])
-                    diagnostics?.log(event: "speech.pipeline.succeeded", payload: [
-                        "source": "replayAudioBuffer",
-                        "transcript": accepted
-                    ])
-                    return accepted
-                }
-            } catch {
-                latestError = error
-                recordFailure(error, stage: "speech.replay", method: .replayAudioBuffer, requireOnDevice: false)
-            }
-        } else {
-            setStageStatus(.failed, for: .replayAudioBuffer)
-            diagnostics?.log(event: "speech.replay.failed", payload: [
-                "method": SpeechRecognitionMethod.replayAudioBuffer.rawValue,
-                "reason": "recognizer_unavailable"
-            ])
-        }
-
-        if supportsOnDevice {
-            lastRecognitionMode = .onDeviceFallback
-            lastRecognitionMethod = .onDeviceAudioBuffer
-            setStageStatus(.running, for: .onDeviceAudioBuffer)
-            diagnostics?.log(event: "speech.ondevice.started", payload: stagePayload(
-                method: .onDeviceAudioBuffer,
-                requireOnDevice: true,
-                recognizer: recognizer,
-                contextualCount: context.count,
-                file: url
-            ))
-
-            do {
-                let result = try await recognizeAudioBuffer(
-                    url: url,
-                    recognizer: recognizer,
-                    requireOnDevice: true,
-                    contextualStrings: context
-                )
-                if let accepted = accept(result, method: .onDeviceAudioBuffer, mode: .onDeviceFallback) {
-                    setStageStatus(.success, for: .onDeviceAudioBuffer)
-                    setFinalStatus(.success)
-                    diagnostics?.log(event: "speech.ondevice.succeeded", payload: [
-                        "transcript": accepted,
-                        "confidence": result.confidenceDescription,
-                        "segmentConfidences": result.segmentConfidenceDescription
-                    ])
-                    diagnostics?.log(event: "speech.pipeline.succeeded", payload: [
-                        "source": "onDeviceAudioBuffer",
-                        "transcript": accepted
-                    ])
-                    return accepted
-                }
-            } catch {
-                latestError = error
-                recordFailure(error, stage: "speech.ondevice", method: .onDeviceAudioBuffer, requireOnDevice: true)
-            }
-        } else {
-            setStageStatus(.unsupported, for: .onDeviceAudioBuffer)
-            diagnostics?.log(event: "speech.ondevice.unsupported", payload: [
-                "locale": recognizer.locale.identifier,
-                "supportsOnDeviceRecognition": "false"
-            ])
-        }
-
-        return pipelineFailure(latestError?.localizedDescription ?? "Không nhận dạng được giọng nói.")
-    }
-
-    private func recognizeAudioBuffer(
-        url: URL,
-        recognizer: SFSpeechRecognizer,
-        requireOnDevice: Bool,
-        contextualStrings: [String]
-    ) async throws -> SpeechPassResult {
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        configure(
-            request,
-            requireOnDevice: requireOnDevice,
-            contextualStrings: contextualStrings,
-            partialResults: true
-        )
-        let gate = SpeechContinuationGate()
-        let resultBox = SpeechResultBox()
-
-        replayTask?.cancel()
-        replayTask = nil
-
+    func refreshModelState() async {
+        modelState = .verifying
         do {
-            let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpeechPassResult, Error>) in
-                let task = recognizer.recognitionTask(with: request) { result, error in
-                    if let result {
-                        let pass = Self.passResult(from: result)
-                        resultBox.update(pass, isFinal: result.isFinal)
-                        if result.isFinal, gate.claim() {
-                            continuation.resume(returning: pass)
-                            return
-                        }
-                    }
-
-                    if let error {
-                        resultBox.setErrorIfActive(error)
-                        if gate.claim() {
-                            let snapshot = resultBox.snapshot()
-                            if let best = snapshot.best,
-                               !best.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                continuation.resume(returning: best)
-                            } else {
-                                continuation.resume(throwing: error)
-                            }
-                        }
-                    }
-                }
-                self.replayTask = task
-
-                do {
-                    let file = try AVAudioFile(forReading: url)
-                    guard file.length > 0, file.processingFormat.sampleRate > 0 else {
-                        throw SpeechHotfixError.invalidAudioFile
-                    }
-
-                    while file.framePosition < file.length {
-                        let remaining = file.length - file.framePosition
-                        let frameCount = AVAudioFrameCount(min(Int64(4096), remaining))
-                        guard frameCount > 0,
-                              let buffer = AVAudioPCMBuffer(
-                                pcmFormat: file.processingFormat,
-                                frameCapacity: frameCount
-                              ) else {
-                            throw SpeechHotfixError.unableToCreatePCMBuffer
-                        }
-
-                        try file.read(into: buffer, frameCount: frameCount)
-                        guard buffer.frameLength > 0 else { break }
-                        request.append(buffer)
-                    }
-                    request.endAudio()
-                } catch {
-                    request.endAudio()
-                    task.cancel()
-                    if gate.claim() {
-                        continuation.resume(throwing: error)
-                    }
-                }
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) {
-                    guard gate.claim() else { return }
-                    let snapshot = resultBox.snapshot()
-                    task.cancel()
-                    if let best = snapshot.best,
-                       !best.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        continuation.resume(returning: best)
-                    } else {
-                        continuation.resume(throwing: SpeechHotfixError.timedOut)
-                    }
-                }
+            _ = try await verifyAndResolveModelFiles()
+            modelState = .ready
+        } catch let error as OpenSpeechError {
+            switch error {
+            case .modelMissing(let file): modelState = .missing(file)
+            case .modelInvalid(let file): modelState = .invalid(file)
+            default: modelState = .invalid(error.localizedDescription)
             }
-            replayTask = nil
-            return result
         } catch {
-            replayTask = nil
-            throw error
+            modelState = .invalid(error.localizedDescription)
         }
     }
 
-    private func configure(
-        _ request: SFSpeechRecognitionRequest,
-        requireOnDevice: Bool,
-        contextualStrings: [String],
-        partialResults: Bool
-    ) {
-        request.shouldReportPartialResults = partialResults
-        request.taskHint = .dictation
-        request.contextualStrings = cappedContext(contextualStrings)
-        request.requiresOnDeviceRecognition = requireOnDevice
-    }
-
-    nonisolated private static func passResult(from result: SFSpeechRecognitionResult) -> SpeechPassResult {
-        let segments = result.bestTranscription.segments
-        let confidence: Double
-        if segments.isEmpty {
-            confidence = 0
-        } else {
-            confidence = segments.reduce(0.0) { $0 + Double($1.confidence) } / Double(segments.count)
-        }
-        return SpeechPassResult(
-            text: result.bestTranscription.formattedString,
-            averageConfidence: confidence,
-            segmentConfidences: segments.map(\.confidence)
-        )
-    }
-
-    private func accept(
-        _ result: SpeechPassResult,
-        method: SpeechRecognitionMethod,
-        mode: SpeechRecognitionMode
-    ) -> String? {
-        let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        lastRecognitionMethod = method
-        lastRecognitionMode = mode
-        state = .recognized(trimmed)
+    func resetForNewRecording() {
+        state = .idle
+        localStatus = .notRun
+        remoteStatus = .notRun
+        finalStatus = .notRun
+        localTranscript = ""
+        remoteTranscript = ""
+        alternateTranscript = nil
         lastError = nil
-        liveTranscript = trimmed
-        return trimmed
-    }
-
-    private func cappedContext(_ values: [String]) -> [String] {
-        Array(
-            VietnameseTextNormalizer
-                .normalizedVocabulary(values)
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .prefix(100)
-        )
-    }
-
-    private func stagePayload(
-        method: SpeechRecognitionMethod,
-        requireOnDevice: Bool,
-        recognizer: SFSpeechRecognizer,
-        contextualCount: Int,
-        file: URL
-    ) -> [String: String] {
-        [
-            "method": method.rawValue,
-            "requiresOnDevice": String(requireOnDevice),
-            "locale": recognizer.locale.identifier,
-            "recognizerAvailable": String(recognizer.isAvailable),
-            "onDeviceSupported": String(supportsOnDevice),
-            "contextualCount": String(contextualCount),
-            "file": file.lastPathComponent,
-            "fileExists": String(FileManager.default.fileExists(atPath: file.path))
-        ]
-    }
-
-    private func recordFailure(
-        _ error: Error,
-        stage: String,
-        method: SpeechRecognitionMethod,
-        requireOnDevice: Bool
-    ) {
-        let nsError = error as NSError
-        lastError = nsError.localizedDescription
-        lastRecognitionMethod = method
-        lastRecognitionMode = requireOnDevice ? .onDeviceFallback : .online
-        rememberError(nsError)
-        setStageStatus(.failed, for: method)
-
-        var payload: [String: String] = [
-            "method": method.rawValue,
-            "recognitionMode": requireOnDevice ? SpeechRecognitionMode.onDeviceFallback.rawValue : SpeechRecognitionMode.online.rawValue,
-            "requiresOnDevice": String(requireOnDevice),
-            "domain": nsError.domain,
-            "code": String(nsError.code),
-            "description": nsError.localizedDescription,
-            "failureReason": nsError.localizedFailureReason ?? "",
-            "locale": recognizer?.locale.identifier ?? "vi-VN",
-            "recognizerAvailable": String(recognizer?.isAvailable ?? false),
-            "onDeviceSupported": String(supportsOnDevice)
-        ]
-        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-            payload["underlyingDomain"] = underlying.domain
-            payload["underlyingCode"] = String(underlying.code)
-            payload["underlyingDescription"] = underlying.localizedDescription
-        }
-        diagnostics?.log(event: "\(stage).failed", payload: payload)
-    }
-
-    private func pipelineFailure(_ message: String) -> String? {
-        lastError = message
-        state = .failed(message)
-        setFinalStatus(.failed)
-        diagnostics?.log(event: "speech.pipeline.failed", payload: [
-            "error": message,
-            "lastMethod": lastRecognitionMethod.rawValue,
-            "onDeviceSupported": String(supportsOnDevice),
-            "localFallback": localFallbackStatus.rawValue
-        ])
-        return nil
-    }
-
-    private func resetStatusesForNewPipeline() {
-        setStageStatus(.notRun, for: .liveAudioBuffer)
-        setStageStatus(.notRun, for: .replayAudioBuffer)
-        setStageStatus(supportsOnDevice ? .notRun : .unsupported, for: .onDeviceAudioBuffer)
-        localFallbackStatus = .notInstalled
-        UserDefaults.standard.set(SpeechStageStatus.notInstalled.rawValue, forKey: StatusKeys.local)
-        setFinalStatus(.running)
         lastErrorDomain = ""
         lastErrorCode = ""
         lastErrorDescription = ""
-        let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: StatusKeys.errorDomain)
-        defaults.removeObject(forKey: StatusKeys.errorCode)
-        defaults.removeObject(forKey: StatusKeys.errorDescription)
+        lastInferenceSeconds = nil
+        lastRealtimeFactor = nil
     }
 
-    private func setStageStatus(_ status: SpeechStageStatus, for method: SpeechRecognitionMethod) {
-        let defaults = UserDefaults.standard
-        switch method {
-        case .liveAudioBuffer:
-            liveStatus = status
-            defaults.set(status.rawValue, forKey: StatusKeys.live)
-        case .replayAudioBuffer:
-            replayStatus = status
-            defaults.set(status.rawValue, forKey: StatusKeys.replay)
-        case .onDeviceAudioBuffer:
-            onDeviceStatus = status
-            defaults.set(status.rawValue, forKey: StatusKeys.onDevice)
+    func transcribe(
+        url: URL,
+        catalogProducts: [String] = [],
+        allowRemoteReinforcement: Bool = true
+    ) async -> String? {
+        state = .recognizing
+        localStatus = .running
+        remoteStatus = .notRun
+        finalStatus = .running
+        lastRecognitionMode = .localOffline
+        lastRecognitionMethod = .sherpaOnnxLocal
+        lastError = nil
+        alternateTranscript = nil
+
+        diagnostics?.log(event: "speech.pipeline.started", payload: [
+            "engine": Self.engineName,
+            "engineVersion": Self.engineVersion,
+            "model": Self.modelName,
+            "file": url.lastPathComponent,
+            "remoteEnabled": String(remoteReinforcementEnabled && allowRemoteReinforcement)
+        ])
+        diagnostics?.log(event: "speech.local.started", payload: [
+            "engine": Self.engineName,
+            "model": Self.modelName,
+            "fileExists": String(FileManager.default.fileExists(atPath: url.path))
+        ])
+
+        do {
+            let local = try await recognizeLocally(url: url)
+            let localText = local.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !localText.isEmpty else { throw OpenSpeechError.emptyTranscript }
+
+            localTranscript = localText
+            localStatus = .success
+            modelState = .ready
+            lastInferenceSeconds = local.inferenceSeconds
+            lastRealtimeFactor = local.audioSeconds > 0 ? local.inferenceSeconds / local.audioSeconds : nil
+            diagnostics?.log(event: "speech.local.succeeded", payload: [
+                "transcript": localText,
+                "inferenceSeconds": String(format: "%.3f", local.inferenceSeconds),
+                "audioSeconds": String(format: "%.3f", local.audioSeconds),
+                "rtf": lastRealtimeFactor.map { String(format: "%.3f", $0) } ?? "nil"
+            ])
+
+            var remoteText: String?
+            if allowRemoteReinforcement && remoteReinforcementEnabled && !remoteEndpointURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                remoteStatus = .running
+                diagnostics?.log(event: "speech.remote.started", payload: safeRemoteEndpointPayload())
+                do {
+                    let samples = try await loadMonoSamples(url: url)
+                    let wav = Self.makePCM16WAV(samples: samples.samples, sampleRate: samples.sampleRate)
+                    let remote = try await requestRemoteTranscript(wavData: wav)
+                    let trimmed = remote.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        remoteText = trimmed
+                        remoteTranscript = trimmed
+                        remoteStatus = .success
+                        diagnostics?.log(event: "speech.remote.succeeded", payload: ["transcript": trimmed])
+                    } else {
+                        remoteStatus = .failed
+                    }
+                } catch {
+                    remoteStatus = .failed
+                    diagnostics?.log(event: "speech.remote.failed", payload: errorPayload(error))
+                }
+            }
+
+            let decision = SpeechTranscriptArbitrator.choose(
+                local: localText,
+                remote: remoteText,
+                catalogProducts: catalogProducts
+            )
+            alternateTranscript = decision.alternate
+            lastRecognitionMethod = decision.source
+            lastRecognitionMode = decision.source == .sherpaOnnxLocal ? .localOffline : .selfHostedReinforcement
+            finalStatus = .success
+            state = .recognized(decision.selected)
+            diagnostics?.log(event: "speech.arbitration", payload: [
+                "selectedSource": decision.source.rawValue,
+                "localScore": String(format: "%.2f", decision.localScore),
+                "remoteScore": decision.remoteScore.map { String(format: "%.2f", $0) } ?? "nil",
+                "alternateAvailable": String(decision.alternate != nil)
+            ])
+            diagnostics?.log(event: "speech.pipeline.succeeded", payload: [
+                "source": decision.source.rawValue,
+                "transcript": decision.selected
+            ])
+            return decision.selected
+        } catch {
+            localStatus = error is OpenSpeechError ? .failed : .failed
+            finalStatus = .failed
+            state = .failed(error.localizedDescription)
+            recordError(error)
+            diagnostics?.log(event: "speech.local.failed", payload: errorPayload(error))
+            diagnostics?.log(event: "speech.pipeline.failed", payload: errorPayload(error))
+            return nil
         }
     }
 
-    private func setFinalStatus(_ status: SpeechStageStatus) {
-        finalStatus = status
-        UserDefaults.standard.set(status.rawValue, forKey: StatusKeys.final)
+    func transcribeLocalOnly(url: URL, catalogProducts: [String] = []) async -> String? {
+        await transcribe(url: url, catalogProducts: catalogProducts, allowRemoteReinforcement: false)
     }
 
-    private func rememberError(_ error: NSError) {
-        lastErrorDomain = error.domain
-        lastErrorCode = String(error.code)
-        lastErrorDescription = error.localizedDescription
-        let defaults = UserDefaults.standard
-        defaults.set(lastErrorDomain, forKey: StatusKeys.errorDomain)
-        defaults.set(lastErrorCode, forKey: StatusKeys.errorCode)
-        defaults.set(lastErrorDescription, forKey: StatusKeys.errorDescription)
+    func activateAlternate(currentText: String) -> String? {
+        guard let alternate = alternateTranscript?.trimmingCharacters(in: .whitespacesAndNewlines), !alternate.isEmpty else { return nil }
+        let current = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        alternateTranscript = current.isEmpty ? nil : current
+        diagnostics?.log(event: "speech.alternate.selected", payload: ["transcript": alternate])
+        return alternate
+    }
+
+    private func recognizeLocally(url: URL) async throws -> LocalRecognitionOutput {
+        let files = try await verifyAndResolveModelFiles()
+        let loaded = try await loadMonoSamples(url: url)
+        guard loaded.samples.count <= loaded.sampleRate * 180 else { throw OpenSpeechError.audioTooLong }
+
+        let engine = localEngine
+        return try await withCheckedThrowingContinuation { continuation in
+            inferenceQueue.async {
+                do {
+                    continuation.resume(returning: try engine.recognize(
+                        samples: loaded.samples,
+                        sampleRate: loaded.sampleRate,
+                        files: files
+                    ))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func verifyAndResolveModelFiles() async throws -> [String: URL] {
+        try await withCheckedThrowingContinuation { continuation in
+            inferenceQueue.async {
+                do {
+                    guard let directory = Self.findBundledModelDirectory() else {
+                        throw OpenSpeechError.modelMissing(Self.modelName)
+                    }
+                    var resolved: [String: URL] = [:]
+                    for item in Self.requiredFiles {
+                        let url = directory.appendingPathComponent(item.name)
+                        guard FileManager.default.fileExists(atPath: url.path) else {
+                            throw OpenSpeechError.modelMissing(item.name)
+                        }
+                        if let expected = item.sha256 {
+                            let actual = try Self.sha256(url: url)
+                            guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
+                                throw OpenSpeechError.modelInvalid(item.name)
+                            }
+                        }
+                        resolved[item.name] = url
+                    }
+                    continuation.resume(returning: resolved)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func bundledModelDirectory() -> URL? { Self.findBundledModelDirectory() }
+
+    nonisolated private static func findBundledModelDirectory() -> URL? {
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("SherpaVI", isDirectory: true),
+            Bundle.main.resourceURL?.appendingPathComponent("SherpaVI", isDirectory: true)
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func loadMonoSamples(url: URL) async throws -> (samples: [Float], sampleRate: Int) {
+        try await withCheckedThrowingContinuation { continuation in
+            inferenceQueue.async {
+                do {
+                    continuation.resume(returning: try Self.readMono16kSamples(url: url))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func readMono16kSamples(url: URL) throws -> (samples: [Float], sampleRate: Int) {
+        guard FileManager.default.fileExists(atPath: url.path) else { throw OpenSpeechError.audioUnreadable }
+        let file = try AVAudioFile(forReading: url)
+        let inputFormat = file.processingFormat
+        guard file.length > 0,
+              let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw OpenSpeechError.audioUnreadable
+        }
+        try file.read(into: inputBuffer)
+
+        let targetRate = 16_000.0
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetRate,
+            channels: 1,
+            interleaved: false
+        ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            throw OpenSpeechError.audioUnreadable
+        }
+
+        let ratio = targetRate / inputFormat.sampleRate
+        let outputCapacity = AVAudioFrameCount(max(1, ceil(Double(inputBuffer.frameLength) * ratio) + 1024))
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputCapacity) else {
+            throw OpenSpeechError.audioUnreadable
+        }
+
+        var supplied = false
+        var conversionError: NSError?
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outputStatus in
+            if supplied {
+                outputStatus.pointee = .endOfStream
+                return nil
+            }
+            supplied = true
+            outputStatus.pointee = .haveData
+            return inputBuffer
+        }
+        if status == .error || conversionError != nil { throw conversionError ?? OpenSpeechError.audioUnreadable }
+        guard let channel = outputBuffer.floatChannelData?[0] else { throw OpenSpeechError.audioUnreadable }
+        let count = Int(outputBuffer.frameLength)
+        return (Array(UnsafeBufferPointer(start: channel, count: count)), 16_000)
+    }
+
+    private func requestRemoteTranscript(wavData: Data) async throws -> String {
+        guard let endpoint = validatedRemoteEndpoint() else { throw OpenSpeechError.invalidRemoteEndpoint }
+        let boundary = "VoiceRevenue-\(UUID().uuidString)"
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        func append(_ string: String) { body.append(Data(string.utf8)) }
+        append("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\(remoteModelName)\r\n")
+        append("--\(boundary)\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nvi\r\n")
+        append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
+        body.append(wavData)
+        append("\r\n--\(boundary)--\r\n")
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw OpenSpeechError.remoteResponse }
+        guard (200...299).contains(http.statusCode) else { throw OpenSpeechError.remoteHTTP(http.statusCode) }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = object["text"] as? String else { throw OpenSpeechError.remoteResponse }
+        return text
+    }
+
+    private func validatedRemoteEndpoint() -> URL? {
+        guard let url = URL(string: remoteEndpointURLString.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(),
+              !host.isEmpty else { return nil }
+        if scheme == "https" { return url }
+        guard scheme == "http", Self.isLocalHost(host) else { return nil }
+        return url
+    }
+
+    private func safeRemoteEndpointPayload() -> [String: String] {
+        guard let url = validatedRemoteEndpoint() else { return ["configured": "false"] }
+        return [
+            "configured": "true",
+            "scheme": url.scheme ?? "",
+            "host": url.host ?? "",
+            "path": url.path,
+            "model": remoteModelName
+        ]
+    }
+
+    nonisolated private static func isLocalHost(_ host: String) -> Bool {
+        if host == "localhost" || host == "127.0.0.1" || host.hasSuffix(".local") { return true }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        if parts[0] == 10 { return true }
+        if parts[0] == 192 && parts[1] == 168 { return true }
+        if parts[0] == 172 && (16...31).contains(parts[1]) { return true }
+        return false
+    }
+
+    nonisolated private static func sha256(url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let data = handle.readData(ofLength: 1_048_576)
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func makePCM16WAV(samples: [Float], sampleRate: Int) -> Data {
+        var pcm = Data(capacity: samples.count * 2)
+        for sample in samples {
+            let clipped = max(-1.0, min(1.0, sample))
+            var value = Int16(clipped * Float(Int16.max)).littleEndian
+            withUnsafeBytes(of: &value) { pcm.append(contentsOf: $0) }
+        }
+        var data = Data()
+        func appendASCII(_ value: String) { data.append(Data(value.utf8)) }
+        func appendUInt32(_ value: UInt32) { var v = value.littleEndian; data.append(Data(bytes: &v, count: 4)) }
+        func appendUInt16(_ value: UInt16) { var v = value.littleEndian; data.append(Data(bytes: &v, count: 2)) }
+        appendASCII("RIFF")
+        appendUInt32(UInt32(36 + pcm.count))
+        appendASCII("WAVEfmt ")
+        appendUInt32(16)
+        appendUInt16(1)
+        appendUInt16(1)
+        appendUInt32(UInt32(sampleRate))
+        appendUInt32(UInt32(sampleRate * 2))
+        appendUInt16(2)
+        appendUInt16(16)
+        appendASCII("data")
+        appendUInt32(UInt32(pcm.count))
+        data.append(pcm)
+        return data
+    }
+
+    private func recordError(_ error: Error) {
+        let ns = error as NSError
+        lastError = error.localizedDescription
+        lastErrorDomain = ns.domain
+        lastErrorCode = String(ns.code)
+        lastErrorDescription = ns.localizedDescription
+        switch error {
+        case OpenSpeechError.modelMissing(let file): modelState = .missing(file)
+        case OpenSpeechError.modelInvalid(let file): modelState = .invalid(file)
+        default: break
+        }
+    }
+
+    private func errorPayload(_ error: Error) -> [String: String] {
+        let ns = error as NSError
+        return [
+            "engine": Self.engineName,
+            "model": Self.modelName,
+            "domain": ns.domain,
+            "code": String(ns.code),
+            "description": ns.localizedDescription,
+            "failureReason": ns.localizedFailureReason ?? ""
+        ]
     }
 }

@@ -37,42 +37,72 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section("Nhận dạng giọng nói") {
+                Section("Nhận dạng mã nguồn mở") {
                     HStack {
-                        Text("vi-VN khả dụng")
+                        Text("Engine")
                         Spacer()
-                        Text(speech.isAvailable ? "Có" : "Không")
+                        Text("sherpa-onnx 1.13.6")
                             .foregroundColor(.secondary)
                     }
                     HStack {
-                        Text("On-device fallback")
+                        Text("Model tiếng Việt")
                         Spacer()
-                        Text(speech.supportsOnDevice ? "Có" : "Không")
-                            .foregroundColor(.secondary)
+                        Text(speech.modelState.displayName)
+                            .foregroundColor(modelStatusColor)
                     }
+                    Text(SpeechRecognizerService.modelName)
+                        .font(.caption.monospaced())
+                        .foregroundColor(.secondary)
                     HStack {
-                        Text("Chế độ")
+                        Text("Hoạt động offline")
                         Spacer()
-                        Text("Live buffer → replay buffer → on-device")
-                            .multilineTextAlignment(.trailing)
-                            .foregroundColor(.secondary)
+                        Text(speech.isAvailable ? "Có" : "Chưa sẵn sàng")
+                            .foregroundColor(speech.isAvailable ? .green : .orange)
                     }
-                    Text("v0.1.4 nhận dạng trực tiếp từ microphone bằng SFSpeechAudioBufferRecognitionRequest. Nếu live không có chữ, app replay chính file audio đã lưu; on-device chỉ chạy khi iPhone báo hỗ trợ.")
+                    Text("Core STT chạy hoàn toàn trên máy bằng engine và model mã nguồn mở. Apple Speech không còn nằm trong đường nhận dạng chính.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+
+                    Button("Kiểm tra model offline") {
+                        Task { await speech.refreshModelState() }
+                    }
+                }
+
+                Section("Tăng độ chính xác bằng máy chủ riêng") {
+                    Toggle("Bật tăng độ chính xác", isOn: $speech.remoteReinforcementEnabled)
+                    TextField("Endpoint, ví dụ http://192.168.1.10:8000/v1/audio/transcriptions", text: $speech.remoteEndpointURLString)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .disabled(!speech.remoteReinforcementEnabled)
+                    TextField("Model trên server", text: $speech.remoteModelName)
+                        .textInputAutocapitalization(.never)
+                        .disabled(!speech.remoteReinforcementEnabled)
+                    Text("Mặc định tắt. Audio chỉ rời khỏi iPhone khi bạn bật tùy chọn này. Server riêng có thể dùng Speaches/faster-whisper; nếu server lỗi hoặc mất mạng, kết quả local vẫn được dùng.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
 
                 Section("Lần nhận diện gần nhất") {
-                    speechStatusRow("Live Apple", speech.liveStatus)
-                    speechStatusRow("Replay Apple", speech.replayStatus)
-                    speechStatusRow("On-device Apple", speech.onDeviceStatus)
-                    speechStatusRow("Local fallback", speech.localFallbackStatus)
+                    speechStatusRow("Local sherpa-onnx", speech.localStatus)
+                    speechStatusRow("Server riêng", speech.remoteStatus)
                     speechStatusRow("Kết quả cuối", speech.finalStatus)
-
+                    if let seconds = speech.lastInferenceSeconds {
+                        HStack {
+                            Text("Thời gian local")
+                            Spacer()
+                            Text(String(format: "%.2f s", seconds)).foregroundColor(.secondary)
+                        }
+                    }
+                    if let rtf = speech.lastRealtimeFactor {
+                        HStack {
+                            Text("Real-time factor")
+                            Spacer()
+                            Text(String(format: "%.2f", rtf)).foregroundColor(.secondary)
+                        }
+                    }
                     if !speech.lastErrorDescription.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Lỗi gần nhất")
-                                .font(.subheadline.bold())
+                            Text("Lỗi gần nhất").font(.subheadline.bold())
                             if !speech.lastErrorDomain.isEmpty || !speech.lastErrorCode.isEmpty {
                                 Text("\(speech.lastErrorDomain) · \(speech.lastErrorCode)")
                                     .font(.caption.monospaced())
@@ -96,12 +126,10 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    Text("Từ điển bổ sung")
-                        .font(.subheadline)
-                    Text("Mỗi dòng một tên mặt hàng thường nói ngắn gọn. Danh mục 1.000+ sản phẩm được dùng local; chỉ shortlist tối đa 100 cụm được gửi cho Apple Speech.")
+                    Text("Từ điển bổ sung").font(.subheadline)
+                    Text("Danh mục và các sửa lỗi đã học chỉ được dùng local để đối chiếu sản phẩm sau khi có transcript thật; app không ép mọi câu nói phải khớp một sản phẩm.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
-
                     TextEditor(text: $vocabulary.editableText)
                         .frame(minHeight: 130)
 
@@ -121,14 +149,11 @@ struct SettingsView: View {
                     HStack {
                         Text("Trạng thái")
                         Spacer()
-                        Text(sync.connectionStatus.displayName)
-                            .foregroundColor(statusColor)
+                        Text(sync.connectionStatus.displayName).foregroundColor(statusColor)
                     }
-
                     TextField("Apps Script Web App URL (.../exec)", text: $sync.webAppURLString)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
-
                     Button("Kiểm tra kết nối") {
                         Task {
                             let success = await sync.testConnection()
@@ -155,11 +180,11 @@ struct SettingsView: View {
                 }
 
                 Section("Diagnostics") {
-                    Text("Log và audio nằm trên máy, không tự upload. Export Debug Log gộp tối đa 5 session gần nhất để lỗi Speech không biến mất sau khi app mở lại.")
+                    Text("Log và audio nằm trên máy, không tự upload. Diagnostic ghi engine/model, thời gian inference, transcript local/remote và quyết định chọn kết quả.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
-                    Button(model.isProcessingRecording ? "Đang test…" : "Test nhận diện file gần nhất") {
+                    Button(model.isProcessingRecording ? "Đang test…" : "Test offline file gần nhất") {
                         Task { await model.testLastRecordingSpeech() }
                     }
                     .disabled(model.recorder.lastRecordingURL == nil || model.isProcessingRecording)
@@ -172,7 +197,6 @@ struct SettingsView: View {
                             model.alertMessage = "Không tìm thấy diagnostic log để export."
                         }
                     }
-
                     Button("Export Last Recording") {
                         if let url = model.recorder.lastRecordingURL {
                             model.diagnostics.log(event: "diagnostics.audio_export.requested", payload: ["file": url.lastPathComponent])
@@ -182,23 +206,17 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(model.recorder.lastRecordingURL == nil)
-
-                    Button("Xóa Diagnostic Logs", role: .destructive) {
-                        model.diagnostics.clearLogs()
-                    }
+                    Button("Xóa Diagnostic Logs", role: .destructive) { model.diagnostics.clearLogs() }
                 }
 
                 Section("Quyền riêng tư") {
-                    Text("Không quảng cáo, không tracking, không telemetry. Audio được lưu local; Apple Speech có thể dùng dịch vụ Apple khi online. Giao dịch chỉ được gửi tới Apps Script do bạn tự cấu hình nếu bật đồng bộ.")
+                    Text("Không quảng cáo, tracking hay telemetry. STT local không gửi audio cho Apple hoặc cloud. Chỉ khi bạn tự bật máy chủ tăng độ chính xác thì audio mới được gửi tới endpoint do chính bạn cấu hình. Google Sheets vẫn là tùy chọn riêng.")
                 }
             }
             .navigationTitle("Cài đặt")
-            .toolbar {
-                Button("Đóng") { dismiss() }
-            }
-            .sheet(item: $shareFile) { item in
-                ActivityView(activityItems: [item.url])
-            }
+            .toolbar { Button("Đóng") { dismiss() } }
+            .sheet(item: $shareFile) { item in ActivityView(activityItems: [item.url]) }
+            .task { await speech.refreshModelState() }
         }
     }
 
@@ -207,8 +225,7 @@ struct SettingsView: View {
         HStack {
             Text(label)
             Spacer()
-            Text(status.displayName)
-                .foregroundColor(speechStatusColor(status))
+            Text(status.displayName).foregroundColor(speechStatusColor(status))
         }
     }
 
@@ -218,6 +235,15 @@ struct SettingsView: View {
         case .failed: return .red
         case .running: return .orange
         case .unsupported, .notInstalled, .notRun: return .secondary
+        }
+    }
+
+    private var modelStatusColor: Color {
+        switch speech.modelState {
+        case .ready: return .green
+        case .verifying: return .orange
+        case .missing, .invalid: return .red
+        case .unknown: return .secondary
         }
     }
 

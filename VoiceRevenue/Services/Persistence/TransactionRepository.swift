@@ -29,6 +29,34 @@ final class TransactionRepository: ObservableObject {
         reload()
     }
 
+    func update(
+        _ item: TransactionEntity,
+        amountVND: Int64,
+        customerName: String?,
+        product: String?,
+        paymentMethod: PaymentMethod,
+        paymentAt: Date?,
+        notes: String?,
+        markForSync: Bool
+    ) throws {
+        guard amountVND > 0 else { throw RepositoryError.missingAmount }
+        item.amountVND = amountVND
+        item.customerName = Self.nilIfBlank(customerName)
+        item.product = Self.nilIfBlank(product)
+        item.paymentMethod = paymentMethod.rawValue
+        item.paymentAt = paymentAt
+        item.notes = Self.nilIfBlank(notes)
+        item.needsReview = false
+        item.syncStatus = markForSync ? SyncStatus.pending.rawValue : SyncStatus.notConfigured.rawValue
+        try context.save()
+        reload()
+    }
+
+    private static func nilIfBlank(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func reload() {
         let request = TransactionEntity.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]

@@ -206,7 +206,7 @@ enum TransactionParser {
         }
 
         if let money {
-            candidate = replacingInsensitive(money.matchedText, in: candidate, with: " ")
+            candidate = removingMoneyExpressionAndCue(money, from: candidate)
         }
         if let time {
             candidate = replacingInsensitive(time.matchedText, in: candidate, with: " ")
@@ -221,7 +221,7 @@ enum TransactionParser {
         candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
 
         let prefixes = [
-            "lúc", "khoảng", "trả", "thanh toán", "đã trả", "mua", "lấy", "tiền cái",
+            "lúc", "khoảng", "trả", "thanh toán", "đã trả", "mua", "bán", "lấy", "tiền cái",
             "tiền", "cho cái", "cho", "gồm", "bao gồm", "cái", "đơn hàng", "đơn", "là"
         ]
         var changed = true
@@ -241,6 +241,50 @@ enum TransactionParser {
 
         guard !candidate.isEmpty else { return nil }
         return candidate
+    }
+
+
+    /// Removes the detected money span plus a monetary cue that is directly attached to it.
+    /// The cue is removed only when it ends immediately before the amount, so real product names
+    /// such as "giá đỡ điện thoại" remain intact.
+    private static func removingMoneyExpressionAndCue(_ money: MoneyParseResult, from input: String) -> String {
+        guard let amountRange = input.range(
+            of: money.matchedText,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) else {
+            return replacingInsensitive(money.matchedText, in: input, with: " ")
+        }
+
+        let beforeAmount = input[..<amountRange.lowerBound]
+        let cues = [
+            "thành tiền", "tổng cộng", "thanh toán", "với giá", "giá là", "tiền là",
+            "đã trả", "giá", "tiền", "tổng", "hết", "thu", "trả"
+        ]
+
+        var cueStart: String.Index?
+        for cue in cues.sorted(by: { $0.count > $1.count }) {
+            guard let range = beforeAmount.range(
+                of: cue,
+                options: [.backwards, .caseInsensitive, .diacriticInsensitive]
+            ) else { continue }
+
+            let suffix = beforeAmount[range.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            guard suffix.isEmpty else { continue }
+
+            if range.lowerBound > beforeAmount.startIndex {
+                let previous = beforeAmount.index(before: range.lowerBound)
+                let character = beforeAmount[previous]
+                guard !character.isLetter && !character.isNumber else { continue }
+            }
+            cueStart = range.lowerBound
+            break
+        }
+
+        var output = input
+        let removalStart = cueStart ?? amountRange.lowerBound
+        output.replaceSubrange(removalStart..<amountRange.upperBound, with: " ")
+        return output
     }
 
     private static func replacingInsensitive(_ needle: String, in input: String, with replacement: String) -> String {
